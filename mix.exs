@@ -1,21 +1,27 @@
 defmodule GolfScoring.MixProject do
   use Mix.Project
 
-  def project do
-    [
-      app: :golf_scoring,
-      version: "0.1.0",
-      elixir: "~> 1.17",
-      elixirc_paths: elixirc_paths(Mix.env()),
-      start_permanent: Mix.env() == :prod,
-      aliases: aliases(),
-      deps: deps(),
-      usage_rules: [file: "AGENTS.md", usage_rules: [~r/.*/]],
-      compilers: [:phoenix_live_view] ++ Mix.compilers(),
-      listeners: [Phoenix.CodeReloader],
-      consolidate_protocols: Mix.env() != :dev
-    ]
-  end
+    def project do
+      [
+        app: :golf_scoring,
+        version: "0.1.0",
+        elixir: "~> 1.17",
+        elixirc_paths: elixirc_paths(Mix.env()),
+        start_permanent: Mix.env() == :prod,
+        aliases: aliases(),
+        deps: deps(),
+        usage_rules: [file: "AGENTS.md", usage_rules: [~r/.*/]],
+    
+        dialyzer: [
+          plt_local_path: "priv/plts",
+          plt_core_path: "priv/plts"
+        ],
+    
+        compilers: [:phoenix_live_view] ++ Mix.compilers(),
+        listeners: [Phoenix.CodeReloader],
+        consolidate_protocols: Mix.env() != :dev
+      ]
+    end
 
   # Configuration for the OTP application.
   #
