@@ -95,7 +95,7 @@ defmodule GolfScoring.MixProject do
         "esbuild golf_scoring --minify",
         "phx.digest"
       ],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"],
+      precommit: ["format --check-formatted", "compile --warnings-as-errors", "test"],
       test: ["ash.setup --quiet", "test"]
     ]
   end
