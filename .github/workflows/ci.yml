@@ -9,44 +9,57 @@ on:
 permissions:
   contents: read
 
-jobs:
-  ci:
-    runs-on: ubuntu-24.04
-    env:
-      TEST_DATABASE_USERNAME: golf_scoring_ci
-      TEST_DATABASE_PASSWORD: golf_scoring_ci
-      TEST_DATABASE_HOST: localhost
-      TEST_DATABASE_PORT: '5432'
-      TEST_DATABASE_NAME: golf_scoring_test
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: golf_scoring_ci
-          POSTGRES_PASSWORD: golf_scoring_ci
-          POSTGRES_DB: golf_scoring_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U golf_scoring_ci -d golf_scoring_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@v7
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
-      - name: Set up Elixir
-        uses: erlef/setup-beam@v1
+env:
+  MIX_ENV: test
+
+  # Keep CI aligned with the accepted DevCore runtime.
+  ELIXIR_VERSION: "1.19.3"
+  OTP_VERSION: "28.1.1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast correctness / code-quality gate
+  # ---------------------------------------------------------------------------
+  quality:
+    name: Quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Elixir and OTP
+        # erlef/setup-beam v1.24.1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
         with:
-          elixir-version: '1.19.3'
-          otp-version: '28.1.1'
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
           version-type: strict
 
-      - name: Install dependencies
+      - name: Restore BEAM build cache
+        id: beam_cache
+        # actions/cache v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            deps
+            _build
+          key: >-
+            beam-${{ runner.os }}-elixir-${{ env.ELIXIR_VERSION }}-otp-${{ env.OTP_VERSION }}-${{ hashFiles('mix.exs', 'mix.lock') }}
+
+      - name: Install Hex and Rebar
         run: |
           mix local.hex --force
           mix local.rebar --force
-          mix deps.get
+
+      - name: Install locked dependencies
+        run: mix deps.get --check-locked
 
       - name: Check formatting
         run: mix format --check-formatted
@@ -54,5 +67,207 @@ jobs:
       - name: Compile with warnings as errors
         run: mix compile --warnings-as-errors
 
-      - name: Run tests
-        run: mix test
+      - name: Run Credo
+        run: mix credo --strict
+
+      - name: Verify Ash generated artifacts are current
+        run: mix ash.codegen --check
+
+      # PRs may restore trusted caches, but only main writes new caches.
+      - name: Save BEAM build cache
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.beam_cache.outputs.cache-hit != 'true'
+        # actions/cache v6.1.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ steps.beam_cache.outputs.cache-primary-key }}
+
+  # ---------------------------------------------------------------------------
+  # Dependency and Phoenix security gate
+  # ---------------------------------------------------------------------------
+  security:
+    name: Security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Elixir and OTP
+        # erlef/setup-beam v1.24.1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+          version-type: strict
+
+      - name: Restore BEAM build cache
+        # actions/cache v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            deps
+            _build
+          key: >-
+            beam-${{ runner.os }}-elixir-${{ env.ELIXIR_VERSION }}-otp-${{ env.OTP_VERSION }}-${{ hashFiles('mix.exs', 'mix.lock') }}
+
+      - name: Install Hex and Rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Install locked dependencies
+        run: mix deps.get --check-locked
+
+      - name: Reject unused locked dependencies
+        run: mix deps.unlock --check-unused
+
+      - name: Audit Hex dependencies
+        run: mix hex.audit
+
+      - name: Run Sobelow
+        run: mix sobelow --exit --strict --format github --private
+
+  # ---------------------------------------------------------------------------
+  # Real PostgreSQL / ExUnit gate
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    env:
+      TEST_DATABASE_USERNAME: golf_scoring_ci
+      TEST_DATABASE_PASSWORD: golf_scoring_ci
+      TEST_DATABASE_HOST: localhost
+      TEST_DATABASE_PORT: "5432"
+      TEST_DATABASE_NAME: golf_scoring_test
+
+    services:
+      postgres:
+        image: postgres:18
+
+        env:
+          POSTGRES_USER: golf_scoring_ci
+          POSTGRES_PASSWORD: golf_scoring_ci
+          POSTGRES_DB: golf_scoring_test
+
+        ports:
+          - 5432:5432
+
+        options: >-
+          --health-cmd "pg_isready -U golf_scoring_ci -d golf_scoring_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Elixir and OTP
+        # erlef/setup-beam v1.24.1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+          version-type: strict
+
+      - name: Restore BEAM build cache
+        # actions/cache v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            deps
+            _build
+          key: >-
+            beam-${{ runner.os }}-elixir-${{ env.ELIXIR_VERSION }}-otp-${{ env.OTP_VERSION }}-${{ hashFiles('mix.exs', 'mix.lock') }}
+
+      - name: Install Hex and Rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Install locked dependencies
+        run: mix deps.get --check-locked
+
+      # The existing `test` alias runs `ash.setup --quiet` first.
+      # Because this job gets a fresh PostgreSQL service, this also proves
+      # database setup/migration health from an empty CI database.
+      - name: Run test suite with coverage
+        run: mix test --cover
+
+  # ---------------------------------------------------------------------------
+  # Heavy static type / success-typing gate
+  # ---------------------------------------------------------------------------
+  dialyzer:
+    name: Dialyzer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Elixir and OTP
+        # erlef/setup-beam v1.24.1
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+          version-type: strict
+
+      - name: Restore BEAM build cache
+        # actions/cache v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            deps
+            _build
+          key: >-
+            beam-${{ runner.os }}-elixir-${{ env.ELIXIR_VERSION }}-otp-${{ env.OTP_VERSION }}-${{ hashFiles('mix.exs', 'mix.lock') }}
+
+      - name: Install Hex and Rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Install locked dependencies
+        run: mix deps.get --check-locked
+
+      - name: Restore Dialyzer PLT cache
+        id: plt_cache
+        # actions/cache v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: priv/plts
+          key: >-
+            plt-${{ runner.os }}-elixir-${{ env.ELIXIR_VERSION }}-otp-${{ env.OTP_VERSION }}-${{ hashFiles('mix.exs', 'mix.lock') }}
+
+      - name: Build Dialyzer PLTs
+        if: steps.plt_cache.outputs.cache-hit != 'true'
+        run: mix dialyzer --plt
+
+      # Only trusted main pushes may populate the persistent PLT cache.
+      - name: Save Dialyzer PLT cache
+        if: >-
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.plt_cache.outputs.cache-hit != 'true'
+        # actions/cache v6.1.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: priv/plts
+          key: ${{ steps.plt_cache.outputs.cache-primary-key }}
+
+      - name: Run Dialyzer
+        run: mix dialyzer --format github --format dialyxir
