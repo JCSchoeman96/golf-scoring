@@ -9616,3 +9616,169 @@ Do **not** generate implementation tickets from this chat until the owner accept
 
 After acceptance, the next artifact should be a concise **local `/wayfinder` handoff prompt** referencing the frozen spec, not a duplicate implementation plan.
 
+
+---
+
+## Golf Live Scoring V2 v1.0 — Amendment 1
+
+### Status
+
+APPROVED — superseding authority for the subjects below.
+
+### Precedence
+
+Amendment 1 is authoritative for the subjects it covers.
+
+Where Amendment 1 conflicts with an earlier provision in this v1.0
+specification, Amendment 1 supersedes that earlier provision.
+
+All unrelated v1.0 provisions remain unchanged and authoritative.
+Superseded text is retained as historical decision context and must not
+be implemented.
+
+### A1 — Shotgun Starting Position
+
+A PlayingGroup has a `starting_round_hole_id` and a `starting_position`.
+The position is a positive integer. Presentation maps 1 to A, 2 to B,
+3 to C, and so on, producing labels such as `14A` and `14B`.
+
+PostgreSQL must enforce `UNIQUE(round_id, starting_round_hole_id,
+starting_position)` and the referenced RoundHole must belong to that same
+Round. Round-opening validation rejects a missing starting RoundHole, an
+invalid position, a duplicate hole/position assignment, or a cross-Round
+RoundHole reference. Do not introduce a ShotgunSlot resource.
+
+This clarifies and supersedes any earlier wording that treats a starting
+hole alone as the complete shotgun assignment where that wording would
+prevent multiple starting groups on the same physical hole. Earlier rules
+about group ownership of the starting hole, RoundHole references and shotgun
+playing order remain valid.
+
+### A2 — Global Mystery Reveal
+
+A MysteryReveal is one global reveal for one MysteryHoleRule, with
+`UNIQUE(mystery_hole_rule_id)`. A MysteryHoleRule has zero or one
+MysteryReveal. MysteryReveal does not belong to a PlayingGroup. No separate
+reveal-cohort resource is required for V1.
+
+At `Round.ready → Round.scoring_open`, each rule's required cohort consists
+of every PlayingGroup containing at least one CompetitionSide participating
+in that rule's RoundCompetition. This cohort is logically fixed by the
+locked Round, Side and Group configuration. A group is not removed merely
+because it is late, offline, has device failure, is slow to submit, or is
+operationally inconvenient. There is no arbitrary
+`exclude_group_from_mystery_reveal` action.
+
+A required group is resolved for the rule's RoundHole by one of these
+reveal-eligibility outcomes, which are not a new PlayingGroup lifecycle:
+
+- `SUBMITTED`: a complete authoritative group HoleSubmission for the
+  RoundHole was accepted by the server. An IndexedDB-only capture does not
+  count.
+- `PAPER_RECOVERED`: the group played the hole but digital scoring could not
+  be recovered normally. An authenticated Event Admin or Competition Manager
+  enters all required active-player outcomes through the authoritative
+  scoring path, with source `paper_recovery`, a reason/context and a
+  mandatory AuditEvent. Ordinary outcome, pickup and scoring validation,
+  HoleResult revisions and verification requirements still apply.
+- `NOT_APPLICABLE`: before the group plays the hole, no CompetitionSide in
+  that group remains eligible in the applicable RoundCompetition, as
+  established by explicit participation and competition state. A partial
+  withdrawal or one excluded side does not qualify while another applicable
+  side remains eligible.
+
+Disqualification alone does not resolve the group. When an applicable side
+remains eligible, the group remains required. If no applicable side remains
+eligible before play of the hole, the group may be `NOT_APPLICABLE`. An
+accepted authoritative submission remains sufficient for reveal completion
+when a later disqualification or exclusion occurs. Reveal eligibility does
+not retroactively reinterpret golf-rule penalties.
+
+The rule transitions `hidden → revealed` only when all required groups are
+resolved. `revealed` is terminal. Re-evaluate eligibility transactionally
+after an accepted HoleSubmission, accepted paper recovery, or relevant
+competition eligibility transition. Lock the affected MysteryHoleRule,
+re-read authoritative cohort resolution, and create the unique reveal only
+if all groups are resolved and no reveal exists. Commit before PubSub.
+Concurrent last-group submissions must not produce duplicate or premature
+reveals. PostgreSQL is authority and PubSub is notification only; a crash
+after commit and before broadcast cannot erase the reveal. Finalize a
+consistent lock order during implementation design.
+
+Before global reveal, player/public output must not expose the hidden rule,
+side-hole contribution, totals, rank changes, deltas or tie-break effects
+that reveal or permit inference of the hidden contribution. The Mystery
+leaderboard uses ordinary known contributions and globally revealed Mystery
+contributions only, and displays pending and provisional status, including
+`Mystery result pending…` for an unrevealed hole. Standard Better-Ball
+remains live from accepted authoritative HoleResults. After global reveal,
+recalculate the affected Mystery standings from committed authoritative
+state and broadcast a refresh after commit.
+
+In shotgun play, a Mystery rule may remain hidden until late in the round
+because another required group has not yet completed that physical hole.
+This is intentional: competition secrecy and fairness take priority over
+immediate per-group reveal.
+
+### Superseded v1.0 Provisions
+
+The following historical clauses remain in place but are not current
+implementation authority where described here:
+
+- Section 29, Secret rule integrity item 4 and Reveal flow: one group's
+  complete results and submission do not by themselves reveal the rule or
+  activate the Mystery contribution. The setup lock, secrecy and audited
+  post-reveal correction requirements remain valid.
+- Section 41, Reveal integrity: replace group/hole reveal eligibility with
+  global rule eligibility. Recalculation and server-side secrecy remain
+  valid subject to A2's restrictions on hidden derived contributions.
+- Section 42, Hole submission boundary: the step saying the Mystery rule
+  becomes reveal-eligible after a single group's submission, and the
+  resulting immediate Mystery projection update, are superseded. Recording
+  results, asynchronous verification/query and the audited correction path
+  after submission or reveal remain valid.
+- Section 51, Mystery rules while offline: the example's acceptance →
+  reveal-eligible → reveal sequence is superseded insofar as one group's
+  sync implies reveal. Local queueing, server acceptance, no preloading,
+  stale leaderboard labelling and server-authoritative refresh remain valid.
+- Section 57.4, MysteryReveal: per-PlayingGroup ownership, the single-group
+  guard and group-specific publication side effects are superseded. Its
+  terminal `revealed` lifecycle and prohibition on preloading remain valid.
+- Section 57.12: remove the current-authority meaning of the
+  `MysteryReveal ── PlayingGroup` relationship. Section 57.13 invariant 40:
+  replace group-specific reveal eligibility with A2's global eligibility.
+  Section 57.14: replace `UNIQUE(mystery_hole_rule_id, playing_group_id)`
+  with `UNIQUE(mystery_hole_rule_id)`.
+- Section 61.13, `reveal_mystery_rule`: replace the single-group submission
+  guard and side effect with A2's global cohort guard. Section 61.14,
+  `submit_group_hole` atomic side effect 5: replace group-specific reveal
+  creation with transactional global eligibility re-evaluation.
+- Section 62.13: replace the single-group submission reveal transition with
+  A2's global resolution transition.
+- Section 64.4, transaction step 12: reveal creation is permitted only after
+  A2's locked global cohort recheck; a single submission is not sufficient.
+- Section 64.9: replace 'before any group has revealed' with 'before global
+  reveal' and replace 'once any PlayingGroup has revealed' with 'once the
+  rule has been globally revealed'. Server secrecy, ordinary post-open
+  mutation prohibition, exceptional audited pre-reveal repair, and the
+  requirement for an audited competition ruling after reveal remain valid.
+- Section 64.16: replace `UNIQUE(mystery_hole_rule_id, playing_group_id)`
+  with `UNIQUE(mystery_hole_rule_id)`.
+
+### Unchanged Authority
+
+All v1.0 provisions outside the subjects explicitly changed above remain
+unchanged and authoritative. In particular, accepted score facts, group
+membership and side membership remain distinct; score corrections remain
+audited; and finalization still requires reproducible official results.
+
+### Architecture Consequences
+
+`MysteryReveal` owns one global rule reveal and has no PlayingGroup foreign
+key. `MysteryRevealEligibility` evaluates every fixed required group and its
+authoritative resolution, using existing submission, participation and
+competition records. Submission and relevant eligibility transitions trigger
+the global recheck; they do not reveal solely because one group completes a
+hole. Global reveal, pending presentation, indirect-leak prevention and
+Mystery leaderboard activation belong in the scoring-track phase. The
+starting position belongs to PlayingGroup and round-opening validation.
