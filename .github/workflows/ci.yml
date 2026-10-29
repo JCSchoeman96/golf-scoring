@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    env:
+      TEST_DATABASE_USERNAME: golf_scoring_ci
+      TEST_DATABASE_PASSWORD: golf_scoring_ci
+      TEST_DATABASE_HOST: localhost
+      TEST_DATABASE_PORT: '5432'
+      TEST_DATABASE_NAME: golf_scoring_test
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: golf_scoring_ci
+          POSTGRES_PASSWORD: golf_scoring_ci
+          POSTGRES_DB: golf_scoring_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U golf_scoring_ci -d golf_scoring_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.19.3'
+          otp-version: '28.1.1'
+          version-type: strict
+
+      - name: Install dependencies
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Compile with warnings as errors
+        run: mix compile --warnings-as-errors
+
+      - name: Run tests
+        run: mix test
