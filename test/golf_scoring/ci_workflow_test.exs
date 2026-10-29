@@ -23,6 +23,10 @@ defmodule GolfScoring.CIWorkflowTest do
     "mix dialyzer --format github --format dialyxir"
   ]
 
+  test "Dialyzer includes ExUnit in the test PLT for support modules" do
+    assert :ex_unit in Keyword.get(Mix.Project.config()[:dialyzer], :plt_add_apps, [])
+  end
+
   test "GitHub Actions runs the Phase 0 quality gate on pull requests and main pushes" do
     assert File.regular?(@workflow_path),
            "expected .github/workflows/ci.yml to define the repository CI workflow"

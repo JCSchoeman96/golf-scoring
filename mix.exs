@@ -16,7 +16,8 @@ defmodule GolfScoring.MixProject do
       ],
       dialyzer: [
         plt_local_path: "priv/plts",
-        plt_core_path: "priv/plts/core.plt"
+        plt_core_path: "priv/plts/core.plt",
+        plt_add_apps: [:ex_unit]
       ],
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader],
