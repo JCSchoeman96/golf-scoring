@@ -1,7 +1,9 @@
 defmodule GolfScoringWeb.CSPPolicyTest do
   use GolfScoringWeb.ConnCase, async: true
 
-  test "browser responses use the strict same-origin content security policy", %{conn: conn} do
+  test "browser responses use the production and test policy without broad WebSocket sources", %{
+    conn: conn
+  } do
     conn = get(conn, "/")
     assert [csp] = get_resp_header(conn, "content-security-policy")
 
@@ -10,7 +12,9 @@ defmodule GolfScoringWeb.CSPPolicyTest do
     assert csp =~ "style-src 'self' 'unsafe-inline'"
     assert csp =~ "img-src 'self' data:"
     assert csp =~ "font-src 'self' data:"
-    assert csp =~ "connect-src 'self' ws: wss:"
+    assert csp =~ "connect-src 'self'"
+    refute csp =~ "ws:"
+    refute csp =~ "wss:"
     assert csp =~ "object-src 'none'"
     assert csp =~ "base-uri 'self'"
     assert csp =~ "frame-ancestors 'none'"
