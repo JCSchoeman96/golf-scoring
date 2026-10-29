@@ -9782,3 +9782,101 @@ the global recheck; they do not reveal solely because one group completes a
 hole. Global reveal, pending presentation, indirect-leak prevention and
 Mystery leaderboard activation belong in the scoring-track phase. The
 starting position belongs to PlayingGroup and round-opening validation.
+
+---
+
+## Golf Live Scoring V2 v1.0 — Amendment 2
+
+### Status and precedence
+
+APPROVED — superseding authority for the subjects below.
+
+Amendment 2 is authoritative for the subjects it covers. Where Amendment 2
+conflicts with an earlier provision in this v1.0 specification, Amendment 2
+supersedes that earlier provision. All unrelated v1.0 provisions, including
+Amendment 1, remain authoritative. Superseded historical wording remains in
+this document but must not be implemented.
+
+### A3 — System Administration capability
+
+`StaffUser` has a global `system_admin` boolean capability, `NOT NULL` and
+`DEFAULT false`. It is a capability on the existing staff identity, not a new
+`SystemAdmin`, `SystemRole`, `Organisation`, `Tenant` or
+`GlobalRoleAssignment` resource, and not an enterprise RBAC hierarchy.
+
+An active StaffUser with `system_admin = true` may provision and manage
+StaffUser identities, create an Event, bootstrap its first EVENT_ADMIN, perform
+explicitly authorised global administrative recovery, and grant or revoke the
+SYSTEM_ADMIN capability. These are system-level bootstrap and global
+administration actions. The existing EVENT_ADMIN authority over reusable Golf
+Catalog actions remains as specified; this amendment does not introduce an
+implicit SYSTEM_ADMIN bypass for those actions.
+
+SYSTEM_ADMIN does not automatically grant operational authority in any Event.
+Normal Event operations require an active StaffUser, an active
+EventStaffAssignment for that Event, the event role policy and applicable
+lifecycle guards. A System Admin who needs to operate an Event must have an
+appropriate assignment for that Event. The EVENT_ADMIN, COMPETITION_MANAGER,
+REGISTRATION_STAFF and SCORING_SUPPORT roles remain event-scoped.
+
+### Atomic Event bootstrap
+
+New Event creation is an active SYSTEM_ADMIN action. One database transaction
+creates the Event in `draft`, an active EVENT_ADMIN EventStaffAssignment for
+the creating SYSTEM_ADMIN and an AuditEvent. The transaction commits only if
+all three writes succeed. If any fails, no Event or initial assignment remains.
+This action must never create an Event without its initial active EVENT_ADMIN.
+Subsequent event-staff assignment actions use the existing event-scoped policy.
+
+### First SYSTEM_ADMIN and capability guards
+
+Provide an explicit, operator-controlled infrastructure bootstrap outside
+ordinary end-user Event workflows to create or promote an authenticated
+StaffUser as the first active SYSTEM_ADMIN. Record bootstrap evidence or an
+AuditEvent where practical. Refuse ordinary repeated bootstrap once an active
+SYSTEM_ADMIN exists. Do not expose an always-open web endpoint or permanent
+bootstrap backdoor. The Phase 1 implementation ticket determines the exact
+release or deployment mechanism. The same controlled infrastructure boundary
+is the recovery path for an initial or unrecoverable deployment with no active
+SYSTEM_ADMIN.
+
+An active SYSTEM_ADMIN may grant the capability only to an active StaffUser;
+the grant is audited. An active SYSTEM_ADMIN may revoke another SYSTEM_ADMIN's
+capability, but ordinary actions must not leave zero active SYSTEM_ADMIN users;
+the revocation is audited. Suspension or disabling of a SYSTEM_ADMIN obeys the
+same last-active-admin invariant. Concurrent grants, revocations, suspensions,
+disables and bootstrap attempts must preserve these guards transactionally.
+Ordinary application actions cannot remove the last active SYSTEM_ADMIN.
+
+### Historical authority classification
+
+The following clauses were reviewed for A3. Historical text remains in place.
+
+- **SUPERSEDED_HISTORY:** Section 54's EVENT_ADMIN permission to *create* an
+  Event is replaced by SYSTEM_ADMIN Event creation with atomic initial
+  assignment and audit. Its Event editing and event-scoped staff-role
+  management permissions remain current.
+- **SUPERSEDED_HISTORY:** Section 57.2's StaffUser ownership list is extended
+  by `system_admin`; its Event Admin/system administration staff-disable guard
+  is superseded for global staff lifecycle administration and the last-active
+  SYSTEM_ADMIN guard. Event-specific authority still comes from
+  EventStaffAssignment. Session invalidation remains current.
+- **SUPERSEDED_HISTORY:** Section 61.5's `create_event | Event Admin` row is
+  replaced by `create_event | SYSTEM_ADMIN`, with Event=`draft`, the creator's
+  active EVENT_ADMIN assignment and AuditEvent in one atomic transaction.
+  Section 62.1's create-event row is supplemented with the same actor, guard
+  and atomic side effects. Other Event lifecycle rows remain current.
+- **SUPERSEDED_HISTORY:** Sections 61.2 and 64.2, only to the extent they
+  imply every staff action requires an EventStaffAssignment, do not apply to
+  the explicitly listed system-level actions. Their Event-action authority
+  requirements remain current. Section 62.17's staff lifecycle is subject to
+  the last-active SYSTEM_ADMIN guard.
+- **CURRENT_AUTHORITY:** Sections 54 and 61.3 retain EVENT_ADMIN management of
+  event-scoped assignments, including the existing final required event-admin
+  protection. Section 57.2 retains EventStaffAssignment's event-scoped
+  meaning. Staff authentication and event policies remain in force.
+- **CURRENT_AUTHORITY:** Section 61.4's EVENT_ADMIN Golf Catalog actions and
+  snapshot isolation remain unchanged. Global staff identity administration
+  does not itself confer catalog or Event operational authority.
+- **UNRELATED:** Player credentials, scoring roles, competition lifecycle and
+  Amendment 1's shotgun and global Mystery rules are unchanged.

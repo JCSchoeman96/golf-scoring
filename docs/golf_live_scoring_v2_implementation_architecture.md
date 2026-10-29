@@ -1,11 +1,11 @@
 # Golf Live Scoring V2 — Implementation Architecture v1.0
 
-**Status:** Proposed frozen implementation authority — pending owner review.
+**Status:** FROZEN v1.0 — approved implementation authority.
 **Repository:** `JCSchoeman96/golf-scoring`
 **Product/domain authority:** `docs/golf_live_scoring_v2_spec_v1.0.md`
 **Execution tracker:** Plane project `GLS` — Golf Live Scoring V2
 
-This document defines implementation structure and sequencing. It does not override product/domain semantics in the frozen specification. If this architecture conflicts with the frozen Product & Domain Spec, the spec wins. Architecture changes that materially alter product/domain behavior require owner approval and a corresponding spec amendment. Amendment 1 supersedes conflicting historical spec text.
+This document defines implementation structure and sequencing. It does not override product/domain semantics in the frozen specification. If this architecture conflicts with the frozen Product & Domain Spec, the spec wins. Architecture changes that materially alter product/domain behavior require owner approval and a corresponding spec amendment. Amendments 1 and 2 supersede conflicting historical spec text.
 
 ## Principles and authority
 
@@ -30,7 +30,7 @@ The Ash domains and entry files are:
 
 | Resource | Domain | Exact file | Persistence | Responsibility |
 |---|---|---|---|---|
-| `StaffUser` | `Accounts` | `lib/golf_scoring/accounts/staff_user.ex` | PostgreSQL | Staff identity and authentication |
+| `StaffUser` | `Accounts` | `lib/golf_scoring/accounts/staff_user.ex` | PostgreSQL | Staff authentication, global SYSTEM_ADMIN capability and staff lifecycle |
 | `EventStaffAssignment` | `Accounts` | `lib/golf_scoring/accounts/event_staff_assignment.ex` | PostgreSQL | Event-scoped staff authority |
 | `PlayerAccessGrant` | `Accounts` | `lib/golf_scoring/accounts/player_access_grant.ex` | PostgreSQL | Event-scoped player access and revocation |
 | `Course` | `GolfCatalog` | `lib/golf_scoring/golf_catalog/course.ex` | PostgreSQL | Reusable course |
@@ -72,6 +72,8 @@ The Ash domains and entry files are:
 | `SideCompetitionResult` | `SideCompetitions` | `lib/golf_scoring/side_competitions/side_competition_result.ex` | PostgreSQL | Verified and finalized challenge result |
 | `AuditEvent` | `Audit` | `lib/golf_scoring/audit/audit_event.ex` | PostgreSQL | Structured actor, action, context and change history |
 
+`StaffUser.system_admin` is a boolean with `NOT NULL DEFAULT false`. It is a global capability, not a separate resource or an event-policy bypass. An active SYSTEM_ADMIN manages staff identities and system bootstrap; ordinary Event operations require an active event assignment and role policy. The first SYSTEM_ADMIN uses an explicit operator-controlled infrastructure bootstrap that refuses ordinary repetition while an active SYSTEM_ADMIN exists. No permanent bootstrap endpoint exists. Audited grant, revoke, suspend and disable actions must preserve at least one active SYSTEM_ADMIN under concurrency. Operator-controlled infrastructure recovery covers an initial or unrecoverable zero-admin deployment. Event Admin authority over catalog actions remains as specified.
+
 `lib/golf_scoring/scoring/score_query.ex` is the ScoreQuery resource, not a leaderboard read model. Leaderboards are deterministic derived reads, not a second authoritative store.
 
 ## Pure calculators, policies and services
@@ -95,6 +97,7 @@ Calculators and pure policies accept explicit values and return values or valida
 | `lib/golf_scoring/scoring/services/finalization_readiness.ex` | Evaluate readiness | current results, verification, queries and policies | blockers and readiness | official transition |
 | `lib/golf_scoring/scoring/services/leaderboard.ex` | Build deterministic standings | authorized track, current facts and reveals | provisional or official standings | hidden data disclosure or score authority |
 | `lib/golf_scoring/scoring/services/finalize_results.ex` | Coordinate locked finalization and reopen | actor, current results and reason where required | official state or blockers | unlocked stale calculations |
+| `lib/golf_scoring/competition/services/create_event.ex` | Coordinate SYSTEM_ADMIN-authorized Event, initial EVENT_ADMIN assignment and AuditEvent in one transaction | active SYSTEM_ADMIN and event input | draft Event with initial active assignment, or rollback | ordinary cross-event authority, later event lifecycle or policy bypass |
 | `lib/golf_scoring/competition/services/open_round.ex` | Coordinate guarded opening | actor and round setup | opened round or blockers | bypassing guards |
 
 ## Ash and transaction responsibilities
@@ -111,17 +114,29 @@ Calculators and pure policies accept explicit values and return values or valida
 | PostgreSQL constraint | Concurrency-safe structural integrity |
 | Transaction coordinator | Cross-resource atomic operations |
 
-Event and round lifecycle use named actions, policies and guarded orchestration. Staff and player permissions are enforced at server action boundaries against current grants and assignments. Group role handover locks authority and advances its revision. The Primary Scorer and Designated Verifier are different active RoundEntries; each queued scoring or verification command identifies the assignment under which it was captured. Whole-hole submission uses the scoring coordinator. Corrections create revisions and audit and invalidate prior verification. Verification binds an independent eligible actor to the current revision. Query resolution coordinates correction or acceptance with audit. Finalization and reopening use locked readiness rechecks and audit. Mystery reveal uses the locked global eligibility coordinator. Audit creation is part of the same transaction as each required audited mutation. A handicap correction preserves raw HoleResults and their valid raw-score verification while recalculating derived results. A tee correction after accepted scoring requires exceptional Event Admin repair and re-evaluation of affected outcomes. Do not put all internal business logic into one oversized Ash action.
+An active SYSTEM_ADMIN creates a draft Event, their initial active EVENT_ADMIN assignment and an AuditEvent in one transaction; failure rolls back all three. The SYSTEM_ADMIN capability does not bypass event-scoped policy. Event and round lifecycle use named actions, policies and guarded orchestration. Staff and player permissions are enforced at server action boundaries against current grants and assignments. Group role handover locks authority and advances its revision. The Primary Scorer and Designated Verifier are different active RoundEntries; each queued scoring or verification command identifies the assignment under which it was captured. Whole-hole submission uses the scoring coordinator. Corrections create revisions and audit and invalidate prior verification. Verification binds an independent eligible actor to the current revision. Query resolution coordinates correction or acceptance with audit. Finalization and reopening use locked readiness rechecks and audit. Mystery reveal uses the locked global eligibility coordinator. Audit creation is part of the same transaction as each required audited mutation. A handicap correction preserves raw HoleResults and their valid raw-score verification while recalculating derived results. A tee correction after accepted scoring requires exceptional Event Admin repair and re-evaluation of affected outcomes. Do not put all internal business logic into one oversized Ash action.
 
 ## Locking and atomic operations
 
 All concurrency-critical paths use a shared, documented lock order across Round, PlayingGroup and relevant authority, Side/result, score/query/verification and Mystery rule rows. Establish and test the concrete total order before implementing concurrent paths; acquire multiple rows of the same kind in stable ID order. Re-read guards under locks, hold locks only for local database work, and retry or report conflicts without overwriting authority. Every path that touches the same invariant must follow that order, including round opening, role handover, hole submission, paper recovery, score correction, verification, query resolution, global Mystery reveal, side finalization, round finalization and reopen. Never hold locks while calling an external service.
 
+Before any concurrent Phase 4B or Phase 5 write implementation, `/to-tickets` MUST create a dedicated lock-protocol design/characterization ticket, and that ticket must be accepted. It determines and tests the concrete total order for Round, PlayingGroup, GroupRoleAssignment/authority revision, CompetitionSide/CompetitionSideResult, score/query/verification rows, and MysteryHoleRule/MysteryReveal. Multiple rows of one relation are acquired in stable ID order. STOP concurrent Phase 4B/5 work until this gate passes.
+
 Whole-hole submission authorizes the current scorer, locks the PlayingGroup and relevant authority rows, validates expected group revision and current scorer assignment, hole sequence, complete outcomes, and idempotency key plus fingerprint. It atomically writes HoleResults, HoleSubmission receipt, AuditEvent and local durable intents where applicable, then evaluates global Mystery eligibility where relevant. Commit before PubSub. Identical retries return the prior receipt; the same key with a different fingerprint is rejected. External HTTP delivery never runs inside this transaction. A missed broadcast is recovered by re-reading PostgreSQL.
 
 ## Migration dependencies and integrity
 
-Build migration groups in dependency order: accounts and audit; catalog; event/round and round snapshots; players, entries, categories, groups, competitions, sides, memberships and roles; handicap and score facts; verification, queries and revisions; tracks/rules/reveals; communications, sponsorship and side competitions. Introduce supporting unique indexes or composite foreign keys as needed to enforce cross-round ownership. Design cyclic references in staged migrations. Historical, audit and score references default to `RESTRICT`, not cascade delete.
+Build migration groups in dependency order:
+
+- Group A, staff identity and audit: `staff_users`, `audit_events`.
+- Group B, catalog and Event/Round: `courses`, `course_holes`, `tee_sets`, `tee_rating_profiles`, `events`, `event_staff_assignments`, `rounds`, `round_holes`, `round_tee_profile_snapshots`, `round_tee_hole_snapshots`.
+- Group C, participation, competition structure and player access: `players`, `round_entries`, `competition_categories`, `round_entry_category_memberships`, `playing_groups`, `round_competitions`, `competition_sides`, `competition_side_memberships`, `competition_side_results`, `group_role_assignments`, `player_access_grants`.
+- Group D, handicap and pre-open scoring configuration: `handicap_snapshots`, `competition_handicaps`, `scoring_tracks`, `mystery_hole_rules`.
+- Group E, authoritative capture and reveal: `scorecards`, `hole_results`, `hole_submissions`, `mystery_reveals`.
+- Group F, review and correction: `score_verifications`, `score_queries`, `score_revisions`.
+- Group G, communications, sponsorship and side competitions: `event_messages`, `message_dispatches`, `message_deliveries`, `sponsors`, `sponsor_placements`, `side_competitions`, `side_competition_results`.
+
+Use staged migrations where circular foreign keys require them, including optional Event/Round references on early AuditEvent records. Introduce supporting unique indexes or composite foreign keys for cross-round ownership. Historical, audit and score references default to `RESTRICT`, not cascade delete. Enforce `staff_users.system_admin` as `NOT NULL DEFAULT false`; enforce bootstrap and last-active-admin invariants using transactional database serialization and constraints where practical, never UI checks alone.
 
 Required constraints include:
 
@@ -223,80 +238,80 @@ Each phase inherits the global STOP conditions and frozen spec. Tests and exit c
 - Explicitly deferred work: Application domain work.
 - STOP conditions: Toolchain or environment cannot be established.
 
-### Phase 1 — Access, authority and audit
+### Phase 1 — Staff identity, system administration and audit
 
-- Goal: Protect actions and record required mutations.
+- Goal: Establish authenticated staff, safe SYSTEM_ADMIN bootstrap and global staff administration, with AuditEvent before audited mutations.
 - Prerequisites: Phase 0.
-- Resources/modules introduced: Accounts and Audit resources.
-- User-visible outcome: Staff and player access with audit.
-- Critical tests: policy, token exchange, revocation and audit.
-- Exit criteria: Unauthorized actions fail and audit persists.
-- Explicitly deferred work: Competition scoring.
-- STOP conditions: Identity or authority cannot be enforced.
+- Resources/modules introduced: StaffUser, AuditEvent, SYSTEM_ADMIN actions/policies and the operator-controlled first-admin bootstrap mechanism.
+- User-visible outcome: An active SYSTEM_ADMIN can administer staff identities.
+- Critical tests: Non-system-admin Event creation denial, first bootstrap and repeated-bootstrap refusal, grant/revoke, last-active-admin protection including concurrent changes and disable/suspend, disabled staff denial, audit persistence.
+- Exit criteria: An active SYSTEM_ADMIN can be safely established and global staff authority is enforceable and audited.
+- Explicitly deferred work: Operational EventStaffAssignment, Event creation and PlayerAccessGrant.
+- STOP conditions: Identity, bootstrap or last-active-admin authority cannot be enforced.
 
-### Phase 2 — Catalog and round setup
+### Phase 2 — Catalog, Event and round setup
 
-- Goal: Create course and immutable round snapshots.
+- Goal: Establish Event authority, catalog and immutable round snapshots.
 - Prerequisites: Phase 1.
-- Resources/modules introduced: GolfCatalog, Event, Round, RoundHole and tee snapshots.
-- User-visible outcome: Staff configure a round.
-- Critical tests: snapshot isolation, route constraints.
-- Exit criteria: Valid 18-hole setup persists.
-- Explicitly deferred work: Opening scoring.
-- STOP conditions: Snapshot or ownership constraint fails.
+- Resources/modules introduced: Course, CourseHole, TeeSet, TeeRatingProfile, Event, EventStaffAssignment, Round, RoundHole, RoundTeeProfileSnapshot, RoundTeeHoleSnapshot and CreateEvent service.
+- User-visible outcome: A SYSTEM_ADMIN creates an Event with their initial active EVENT_ADMIN assignment; event-authorized staff configure the round.
+- Critical tests: Atomic Event, assignment and audit creation; rollback on assignment failure; non-SYSTEM_ADMIN denial; event-scoped permissions; catalog snapshot isolation; RoundHole routing constraints.
+- Exit criteria: Atomic bootstrap and valid 18-hole setup persist.
+- Explicitly deferred work: Player access and scoring opening.
+- STOP conditions: Event bootstrap, snapshot or ownership constraint fails.
 
 ### Phase 3 — Participation and check-in
 
-- Goal: Prepare players, groups and sides.
+- Goal: Prepare participation, player access, groups and sides.
 - Prerequisites: Phase 2.
-- Resources/modules introduced: Player, RoundEntry, category, group, competition, side, membership and roles.
-- User-visible outcome: Registration, check-in and assignments.
-- Critical tests: uniqueness, check-in, shotgun A/B and same-round tests.
-- Exit criteria: Setup is reviewable; scoring remains closed.
+- Resources/modules introduced: Player, RoundEntry, CompetitionCategory, RoundEntryCategoryMembership, PlayingGroup, RoundCompetition, CompetitionSide, CompetitionSideMembership, CompetitionSideResult, GroupRoleAssignment and PlayerAccessGrant.
+- User-visible outcome: Registration, player access, check-in and assignments.
+- Critical tests: Access exchange and revocation, uniqueness, check-in, shotgun A/B and same-round ownership.
+- Exit criteria: `PARTICIPATION_SETUP_COMPLETE`, `SCORING_CLOSED` and `ROUND_OPENING_BLOCKERS_VISIBLE`. This phase never transitions `ready → scoring_open`.
 - Explicitly deferred work: Opening scoring.
 - STOP conditions: Assignments or eligible participation are ambiguous.
 
-### Phase 4 — Handicap and competition policy
+### Phase 4 — Handicap and complete competition policy/configuration
 
-- Goal: Derive reproducible handicaps and format rules.
+- Goal: Complete and make reproducible all scoring configuration required before opening.
 - Prerequisites: Phase 3.
-- Resources/modules introduced: HandicapSnapshot, CompetitionHandicap, calculators and policies.
-- User-visible outcome: Staff confirm tee and handicap basis.
-- Critical tests: mixed tees, strokes, Stableford, pickup and solo.
-- Exit criteria: Policy outputs match frozen rules.
-- Explicitly deferred work: Opening scoring.
-- STOP conditions: Formula or policy is unclear.
+- Resources/modules introduced: HandicapSnapshot, CompetitionHandicap, ScoringTrack, MysteryHoleRule, CourseHandicap, PlayingHandicap, StrokeAllocation, StablefordPoints, FourBallBest, SoloNormalization, MysteryAggregation, Countback and PickupEligibility.
+- User-visible outcome: Staff configure Standard and Mystery tracks, BEST/WORST/BOTH rules, allowance, Playing Handicap and tie-break/countback policy.
+- Critical tests: Mixed tees, course handicap, playing handicap, stroke allocation, Stableford, pickup, Four-Ball BEST, solo normalization, Mystery BEST/WORST/BOTH, countback, rule completeness and server secrecy.
+- Exit criteria: All scoring and competition configuration required by RoundOpening is reproducible, complete and lock-ready. ScoringTrack and MysteryHoleRule exist before scoring opens.
+- Explicitly deferred work: Opening scoring, score capture and reveal state.
+- STOP conditions: Formula or policy is unclear, or configuration cannot satisfy opening guards.
 
 ### Phase 4B — Round readiness and opening
 
-- Goal: Own ready → scoring_open after all guards.
-- Prerequisites: Phase 4.
+- Goal: Exclusively own `ready → scoring_open` after all guards pass.
+- Prerequisites: Phase 4 and the accepted lock-protocol ticket.
 - Resources/modules introduced: Round opening policy and service.
-- User-visible outcome: Authorized opening with blockers.
-- Critical tests: all opening guards, lock and audit races.
-- Exit criteria: Only a valid ready round opens and configuration locks.
+- User-visible outcome: Authorized opening or actionable blockers.
+- Critical tests: All opening guards, concurrent lock and audit races.
+- Exit criteria: The transaction re-reads and validates the route and snapshots, tee/rating snapshots, RoundEntries, starting RoundHole and position, groups, sides and memberships, active scoring assignments, handicap snapshots, competition handicaps, RoundCompetition, ScoringTrack, MysteryHoleRule and tie-break/countback configuration, plus all other frozen opening invariants. Only a valid ready round opens and locks configuration.
 - Explicitly deferred work: Score submission.
-- STOP conditions: Any hard opening invariant fails.
+- STOP conditions: Any hard opening invariant fails or the shared lock protocol is not accepted.
 
-### Phase 5 — Transaction-safe group scoring
+### Phase 5 — Transaction-safe group scoring and global reveal state
 
-- Goal: Accept complete authoritative holes.
-- Prerequisites: Phase 4B.
-- Resources/modules introduced: Scorecard, HoleResult, HoleSubmission, submission service.
-- User-visible outcome: Online whole-hole scoring.
-- Critical tests: atomicity, idempotency, concurrent submit and handover.
-- Exit criteria: No partial, lost or duplicated score.
-- Explicitly deferred work: Offline queue.
-- STOP conditions: Transaction cannot preserve invariant.
+- Goal: Accept complete authoritative holes and perform global Mystery reveal rechecks.
+- Prerequisites: Phase 4B and the accepted lock-protocol ticket.
+- Resources/modules introduced: Scorecard, HoleResult, HoleSubmission, MysteryReveal, SubmitGroupHole, MysteryRevealEligibility and the transactional global reveal recheck.
+- User-visible outcome: Online whole-hole scoring with global reveal state.
+- Critical tests: Atomic submission, idempotent retry and payload mismatch, current scorer and stale assignment rejection, simultaneous group submissions, last-required-group reveal race, `UNIQUE(mystery_hole_rule_id)`, no premature reveal, no hidden Mystery data in submission responses, and missed PubSub recovery.
+- Exit criteria: No partial, lost or duplicated score; accepted submission, paper recovery and relevant eligibility transitions re-evaluate the fixed global cohort under the lock protocol. The authoritative command contract is complete before offline replay.
+- Explicitly deferred work: Offline queue and leaderboard presentation.
+- STOP conditions: Transaction or secrecy invariant cannot be preserved, or the shared lock protocol is not accepted.
 
 ### Phase 6 — Mobile scoring and offline recovery
 
-- Goal: Preserve pending commands and reconcile safely.
+- Goal: Preserve pending commands and reconcile safely against the completed Phase 5 submission contract, without a second scoring path.
 - Prerequisites: Phase 5.
-- Resources/modules introduced: IndexedDB modules and scoring hook.
-- User-visible outcome: Offline capture, replay and conflict UI.
-- Critical tests: browser restart, order, role change and conflict.
-- Exit criteria: Real browser recovery evidence passes.
+- Resources/modules introduced: IndexedDB pending commands, serializer, queue, connection state, leaderboard cache and scoring hook.
+- User-visible outcome: Offline capture, ordered replay and conflict UI.
+- Critical tests: Real browser restart, stable idempotency key, captured assignment identity, expected revision, order, role change and conflict stop.
+- Exit criteria: Real browser recovery evidence passes; server acceptance remains authority.
 - Explicitly deferred work: Official results.
 - STOP conditions: Stale device can overwrite authority.
 
@@ -306,19 +321,19 @@ Each phase inherits the global STOP conditions and frozen spec. Tests and exit c
 - Prerequisites: Phase 5.
 - Resources/modules introduced: ScoreVerification, ScoreQuery, ScoreRevision and review UI.
 - User-visible outcome: Verify, query and correct scores.
-- Critical tests: independence, invalidation and simultaneous correction/query.
+- Critical tests: Independent revision-bound verification, correction, re-verification, audit and simultaneous correction/query.
 - Exit criteria: Current revisions have explicit review state.
 - Explicitly deferred work: Official finalization.
 - STOP conditions: Revision or audit cannot be preserved.
 
-### Phase 8 — Standard/Mystery tracks and leaderboards
+### Phase 8 — Standard/Mystery leaderboard derivation and presentation
 
-- Goal: Produce reproducible track standings and tie-breaks.
+- Goal: Produce deterministic Standard and Mystery standings and tie-breaks from existing Phase 4 configuration and Phase 5 reveal state.
 - Prerequisites: Phases 6 and 7.
-- Resources/modules introduced: ScoringTrack, MysteryHoleRule, MysteryReveal, leaderboard and calculators.
-- User-visible outcome: Live Standard and guarded global Mystery standings.
-- Critical tests: secrecy, global cohort, races, countback and reproducibility.
-- Exit criteria: Both tracks and tie-breaks reproducible before finalization.
+- Resources/modules introduced: Leaderboard service and presentation components; consume existing ScoringTrack, MysteryHoleRule, MysteryReveal and calculators.
+- User-visible outcome: Standard standings, pending Mystery presentation and globally revealed contributions.
+- Critical tests: Reproducible Standard/Mystery standings, read-model and UI secrecy including indirect inference, deterministic countback integration and correction recomputation.
+- Exit criteria: Both tracks and tie-breaks are reproducible and hidden contributions cannot be inferred before Phase 9 finalization.
 - Explicitly deferred work: Official finalization.
 - STOP conditions: Secrecy or reproducibility cannot be proven.
 
@@ -371,29 +386,29 @@ Each phase inherits the global STOP conditions and frozen spec. Tests and exit c
 ```text
 Engineering foundation
         ↓
-Access / authority / audit
+Staff identity / SYSTEM_ADMIN / audit
         ↓
-Catalog + round snapshots
+Catalog + Event bootstrap + round snapshots
         ↓
-Participation / groups / sides
+Participation / player access / groups / sides
         ↓
-Handicap + competition policy
+Handicap + complete scoring/competition configuration
         ↓
 Guarded round opening
         ↓
-Atomic online scoring
-       ↙             ↘
-Offline recovery   verification/correction
-       \             /
-        scoring tracks + Mystery reveal
-                    ↓
-          official finalization
-                    ↓
-messages / sponsors / side prizes
-                    ↓
-operations + prizegiving readiness
-                    ↓
-144-player rehearsal
+Authoritative scoring + global Mystery reveal
+       ↙                         ↘
+Offline recovery          verification/correction
+       \                         /
+        leaderboard derivation/presentation
+                       ↓
+              official finalization
+                       ↓
+        messaging / sponsors / side prizes
+                       ↓
+        operations / prizegiving readiness
+                       ↓
+             144-player rehearsal
 ```
 
 After their shared contracts are stable, offline queue and verification/correction may proceed in parallel. Independent calculators and test fixtures may proceed in parallel within Phase 4. Messaging, sponsor and side-prize work may be prepared independently after their domain prerequisites, but the phase gate follows official finalization. Shared database invariants and lock protocol require coordinated review.
