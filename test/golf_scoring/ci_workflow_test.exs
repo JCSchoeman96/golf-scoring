@@ -10,10 +10,22 @@ defmodule GolfScoring.CIWorkflowTest do
     "TEST_DATABASE_NAME"
   ]
   @required_commands [
+    "mix deps.get --check-locked",
     "mix format --check-formatted",
     "mix compile --warnings-as-errors",
-    "mix test"
+    "mix credo --strict",
+    "mix ash.codegen --check",
+    "mix deps.unlock --check-unused",
+    "mix hex.audit",
+    "mix sobelow --exit --strict --format github --private",
+    "mix test --cover",
+    "mix dialyzer --plt",
+    "mix dialyzer --format github --format dialyxir"
   ]
+
+  test "Dialyzer includes ExUnit in the test PLT for support modules" do
+    assert :ex_unit in Keyword.get(Mix.Project.config()[:dialyzer], :plt_add_apps, [])
+  end
 
   test "GitHub Actions runs the Phase 0 quality gate on pull requests and main pushes" do
     assert File.regular?(@workflow_path),
@@ -39,12 +51,14 @@ defmodule GolfScoring.CIWorkflowTest do
       |> then(&Regex.scan(~r/^  ([A-Za-z0-9_-]+):\s*$/m, &1, capture: :all_but_first))
       |> List.flatten()
 
-    assert job_names == ["ci"]
+    assert job_names == ["quality", "security", "test", "dialyzer"]
 
-    assert workflow =~ "uses: actions/checkout@v7"
-    assert workflow =~ "uses: erlef/setup-beam@v1"
-    assert workflow =~ "elixir-version: '1.19.3'"
-    assert workflow =~ "otp-version: '28.1.1'"
+    assert workflow =~ "actions/checkout v7.0.1"
+    assert workflow =~ "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    assert workflow =~ "erlef/setup-beam v1.24.1"
+    assert workflow =~ "uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124"
+    assert workflow =~ "ELIXIR_VERSION: \"1.19.3\""
+    assert workflow =~ "OTP_VERSION: \"28.1.1\""
 
     assert workflow =~ ~r/^      postgres:\s*$/m
     assert workflow =~ "image: postgres:18"
