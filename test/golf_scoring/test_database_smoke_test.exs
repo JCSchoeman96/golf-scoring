@@ -1,8 +1,8 @@
 defmodule GolfScoring.TestDatabaseSmokeTest do
   use GolfScoring.DataCase, async: false
 
-  alias GolfScoring.Repo
   alias Ecto.Adapters.SQL.Sandbox
+  alias GolfScoring.Repo
 
   setup_all do
     probe_id = Ecto.UUID.generate() |> String.replace("-", "")
