@@ -14,7 +14,11 @@ defmodule GolfScoring.Accounts.Checks.ActiveEventRole do
   @impl true
   def match?(actor, context, opts) do
     actor_id = if is_map(actor), do: Map.get(actor, :id), else: nil
-    event_id = subject_event_id(Map.get(context, :subject), Map.get(context, :resource))
+
+    event_id =
+      subject_event_id(Map.get(context, :subject), Map.get(context, :resource)) ||
+        subject_event_id(Map.get(context, :changeset), Map.get(context, :resource))
+
     roles = opts[:roles] || List.wrap(opts[:role])
 
     authorized?(actor_id, event_id, roles)
@@ -49,6 +53,19 @@ defmodule GolfScoring.Accounts.Checks.ActiveEventRole do
     else
       _ -> false
     end
+  end
+
+  defp subject_event_id(
+         %Ash.Changeset{resource: GolfScoring.Competition.Event, data: %{id: event_id}},
+         _context_resource
+       ) do
+    event_id
+  end
+
+  defp subject_event_id(%Ash.Changeset{} = changeset, _context_resource) do
+    Ash.Changeset.get_argument(changeset, :event_id) ||
+      Map.get(changeset.attributes, :event_id) ||
+      Map.get(changeset.data, :event_id)
   end
 
   defp subject_event_id(%{resource: resource, data: %{id: event_id}}, _context_resource)
