@@ -42,27 +42,27 @@ defmodule GolfScoring.GolfCatalog.Course do
     update :update_course do
       public? false
       accept [:name, :location]
-      require_atomic? false
-      atomic_upgrade? false
-      change {GolfScoring.GolfCatalog.CourseCatalogGuard, operation: :update_course}
 
       argument :event_id, :uuid do
         allow_nil? false
       end
 
       validate present([:name, :location])
+      validate {GolfScoring.GolfCatalog.Validations.CourseActiveInDatabase, []}
     end
 
     update :archive_course do
       public? false
       accept []
-      require_atomic? false
-      atomic_upgrade? false
-      change {GolfScoring.GolfCatalog.CourseCatalogGuard, operation: :archive_course}
 
       argument :event_id, :uuid do
         allow_nil? false
       end
+
+      validate {GolfScoring.GolfCatalog.Validations.CourseActiveInDatabase,
+                message: "course is already archived"}
+
+      change set_attribute(:status, :archived)
     end
   end
 

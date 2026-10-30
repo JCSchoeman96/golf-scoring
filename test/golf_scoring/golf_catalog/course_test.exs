@@ -101,6 +101,52 @@ defmodule GolfScoring.GolfCatalog.CourseTest do
              )
   end
 
+  test "a stale active Course struct cannot update after the database row is archived" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+
+    {:ok, course} =
+      GolfCatalog.create_course(
+        event.id,
+        %{name: "Stable Name", location: "Stable Place"},
+        actor: admin
+      )
+
+    stale_course = course
+
+    assert {:ok, _archived} = GolfCatalog.archive_course(course, event.id, actor: admin)
+
+    assert {:error, _error} =
+             GolfCatalog.update_course(
+               stale_course,
+               event.id,
+               %{name: "Mutated Name", location: "Mutated Place"},
+               actor: admin
+             )
+
+    reloaded = Repo.get!(Course, course.id)
+    assert reloaded.status == :archived
+    assert reloaded.name == "Stable Name"
+    assert reloaded.location == "Stable Place"
+  end
+
+  test "a stale active Course struct cannot archive an already archived row" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+
+    {:ok, course} =
+      GolfCatalog.create_course(event.id, %{name: "Once", location: "Here"}, actor: admin)
+
+    stale_course = course
+
+    assert {:ok, _} = GolfCatalog.archive_course(course, event.id, actor: admin)
+
+    assert {:error, _error} =
+             GolfCatalog.archive_course(stale_course, event.id, actor: admin)
+
+    assert Repo.get!(Course, course.id).status == :archived
+  end
+
   test "SYSTEM_ADMIN without EventAdmin assignment cannot mutate the catalog" do
     event = create_event!()
     system_admin = create_system_admin!()
@@ -280,6 +326,15 @@ defmodule GolfScoring.GolfCatalog.CourseTest do
 
     assert_raise Postgrex.Error, fn ->
       Repo.query!("DELETE FROM courses WHERE id = $1::uuid", [Ecto.UUID.dump!(course.id)])
+    end
+  end
+
+  test "PostgreSQL rejects CourseHole rows that reference a nonexistent Course" do
+    assert_raise Postgrex.Error, fn ->
+      Repo.query!(
+        "INSERT INTO course_holes (course_id, hole_number) VALUES ($1::uuid, 1)",
+        [Ecto.UUID.dump!(Ecto.UUID.generate())]
+      )
     end
   end
 
