@@ -3,10 +3,6 @@ defmodule GolfScoring.GolfCatalog.Validations.ReferencedCourseActiveInDatabase d
 
   use Ash.Resource.Validation
 
-  import Ash.Expr
-
-  alias Ash.Error.Changes.InvalidAttribute
-  alias GolfScoring.GolfCatalog.Course
   alias GolfScoring.Repo
 
   @impl true
@@ -23,28 +19,30 @@ defmodule GolfScoring.GolfCatalog.Validations.ReferencedCourseActiveInDatabase d
         :ok
 
       course_id ->
-        case Repo.get(Course, course_id) do
-          %{status: :active} ->
-            :ok
+        notify_course_lock_probe()
 
-          _ ->
-            {:error, field: :course_id, message: message}
+        case lock_and_verify_active(course_id) do
+          :ok -> :ok
+          :error -> {:error, field: :course_id, message: message}
         end
     end
   end
 
-  @impl true
-  def atomic(_changeset, opts, context) do
-    message = Keyword.fetch!(opts, :message)
+  defp notify_course_lock_probe do
+    case Process.get(:gls11_course_lock_probe_parent) do
+      nil -> :ok
+      pid when is_pid(pid) -> send(pid, :gls11_course_lock_attempt)
+      _ -> :ok
+    end
+  end
 
-    {:atomic, [:course_id],
-     expr(not exists(Course, id == ^atomic_ref(:course_id) and status == "active")),
-     expr(
-       error(^InvalidAttribute, %{
-         field: :course_id,
-         message: ^(context.message || message),
-         value: ^atomic_ref(:course_id)
-       })
-     )}
+  defp lock_and_verify_active(course_id) do
+    case Repo.query!(
+           "SELECT status FROM courses WHERE id = $1::uuid FOR SHARE",
+           [Ecto.UUID.dump!(course_id)]
+         ) do
+      %{rows: [["active"]]} -> :ok
+      _ -> :error
+    end
   end
 end

@@ -22,7 +22,7 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfile.HoleRating do
       constraints min: 1
     end
 
-    attribute :distance_mm, :integer do
+    attribute :distance_m, :integer do
       allow_nil? true
       public? true
       constraints min: 1

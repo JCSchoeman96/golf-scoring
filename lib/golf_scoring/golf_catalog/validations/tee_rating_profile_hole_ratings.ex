@@ -18,9 +18,8 @@ defmodule GolfScoring.GolfCatalog.Validations.TeeRatingProfileHoleRatings do
     hole_ratings = Ash.Changeset.get_attribute(changeset, :hole_ratings) || []
 
     with {:ok, tee_set} <- fetch_tee_set(tee_set_id),
-         :ok <- validate_no_duplicate_holes(hole_ratings),
-         :ok <- validate_holes_belong_to_course(hole_ratings, tee_set.course_id) do
-      :ok
+         :ok <- validate_no_duplicate_holes(hole_ratings) do
+      validate_holes_belong_to_course(hole_ratings, tee_set.course_id)
     end
   end
 

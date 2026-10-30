@@ -13,6 +13,8 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
   alias GolfScoring.Repo
 
   @password "GLS-11 synthetic staff passphrase 2026"
+  @duplicate_profile_constraint "tee_rating_profiles_unique_rating_context_per_tee_set_index"
+  @orphan_tee_set_fkey "tee_rating_profiles_tee_set_id_fkey"
 
   setup do
     Process.put(:gls11_email_prefix, "gls11-#{Ecto.UUID.generate()}")
@@ -66,6 +68,70 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
     assert same.id == tee_set.id
   end
 
+  test "configure_tee_set on an active Course may complete before a later archive" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+
+    {:ok, course} =
+      GolfCatalog.create_course(event.id, %{name: "Live Then Archive", location: "ZA"},
+        actor: admin
+      )
+
+    assert {:ok, tee_set} =
+             GolfCatalog.configure_tee_set(
+               event.id,
+               %{course_id: course.id, name: "Gold"},
+               actor: admin
+             )
+
+    assert {:ok, archived} = GolfCatalog.archive_course(course, event.id, actor: admin)
+    assert archived.status == :archived
+    assert Repo.get!(TeeSet, tee_set.id).name == "Gold"
+  end
+
+  @tag :real_concurrency
+  test "concurrent Course archival is rechecked before configure_tee_set commits" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+
+    {:ok, course} =
+      GolfCatalog.create_course(event.id, %{name: "Race Course", location: "ZA"}, actor: admin)
+
+    blocker = start_course_archive_blocker(course.id)
+    blocker_pid = await_blocker!(blocker, :gls11_course_archive_locked)
+
+    try do
+      parent = self()
+
+      task =
+        start_independent_operation(:gls11_configure_tee_set_race, fn ->
+          Process.put(:gls11_course_lock_probe_parent, parent)
+
+          GolfCatalog.configure_tee_set(
+            event.id,
+            %{course_id: course.id, name: "Blue"},
+            actor: admin
+          )
+        end)
+
+      [operation_pid] = await_operation_pids([:gls11_configure_tee_set_race])
+      refute blocker_pid == operation_pid
+
+      assert_receive :gls11_course_lock_attempt, 5_000
+
+      send(blocker.pid, :release_gls11_course_archive)
+      assert {:ok, :released} = Task.await(blocker, 10_000)
+      assert {:error, _error} = Task.await(task, 10_000)
+
+      assert Repo.query!(
+               "SELECT 1 FROM tee_sets WHERE course_id = $1::uuid AND name = 'Blue'",
+               [Ecto.UUID.dump!(course.id)]
+             ).rows == []
+    after
+      release_course_blocker(blocker)
+    end
+  end
+
   test "archived Course rejects configure_tee_set using durable database state" do
     event = create_event!()
     admin = create_event_admin!(event)
@@ -110,7 +176,7 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
           course_hole_id: hole.id,
           par: 4,
           stroke_index: hole.hole_number,
-          distance_mm: 350_000 + hole.hole_number * 1_000
+          distance_m: 350 + hole.hole_number
         }
       end)
 
@@ -133,7 +199,7 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
     assert profile.slope_rating == 130
     assert profile.total_par == 12
     assert length(profile.hole_ratings) == 3
-    assert hd(profile.hole_ratings).distance_mm == 351_000
+    assert hd(profile.hole_ratings).distance_m == 351
   end
 
   test "two rating profiles on the same TeeSet persist independent rating facts" do
@@ -141,12 +207,12 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
     admin = create_event_admin!(event)
     {_course, tee_set, holes} = course_with_tee_and_holes!(event, admin, hole_numbers: [1, 2])
 
-    base_hole = fn hole, par, si, distance_mm ->
+    base_hole = fn hole, par, si, distance_m ->
       %{
         course_hole_id: hole.id,
         par: par,
         stroke_index: si,
-        distance_mm: distance_mm
+        distance_m: distance_m
       }
     end
 
@@ -162,8 +228,8 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
                  slope_rating: 125,
                  total_par: 8,
                  hole_ratings: [
-                   base_hole.(hole_1, 4, 1, 350_000),
-                   base_hole.(hole_2, 4, 2, 360_000)
+                   base_hole.(hole_1, 4, 1, 350),
+                   base_hole.(hole_2, 4, 2, 360)
                  ]
                },
                actor: admin
@@ -179,8 +245,8 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
                  slope_rating: 138,
                  total_par: 9,
                  hole_ratings: [
-                   base_hole.(hole_1, 5, 2, 380_000),
-                   base_hole.(hole_2, 4, 1, 340_000)
+                   base_hole.(hole_1, 5, 2, 380),
+                   base_hole.(hole_2, 4, 1, 340)
                  ]
                },
                actor: admin
@@ -246,16 +312,48 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
                actor: admin
              )
 
-    assert_raise Postgrex.Error, fn ->
-      Repo.query!(
-        """
-        INSERT INTO tee_rating_profiles
-          (tee_set_id, rating_label, course_rating, slope_rating, total_par, hole_ratings)
-        VALUES ($1::uuid, 'Duplicate Me', 71.0, 125, 4, '[]'::jsonb)
-        """,
-        [Ecto.UUID.dump!(tee_set.id)]
-      )
-    end
+    duplicate_error =
+      assert_raise Postgrex.Error, fn ->
+        Repo.query!(
+          """
+          INSERT INTO tee_rating_profiles
+            (tee_set_id, rating_label, course_rating, slope_rating, total_par)
+          VALUES ($1::uuid, 'Duplicate Me', 71.0, 125, 4)
+          """,
+          [Ecto.UUID.dump!(tee_set.id)]
+        )
+      end
+
+    assert duplicate_error.postgres.code == :unique_violation
+    assert duplicate_error.postgres.constraint == @duplicate_profile_constraint
+  end
+
+  test "malformed duplicate-profile SQL does not prove the unique index constraint" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    {_course, tee_set, [hole | _]} = course_with_tee_and_holes!(event, admin, hole_numbers: [1])
+
+    assert {:ok, _} =
+             GolfCatalog.configure_tee_rating_profile(
+               event.id,
+               profile_params(tee_set.id, "Duplicate Me", "71.0", 125, 4, hole),
+               actor: admin
+             )
+
+    malformed_error =
+      assert_raise Postgrex.Error, fn ->
+        Repo.query!(
+          """
+          INSERT INTO tee_rating_profiles
+            (tee_set_id, rating_label, course_rating, slope_rating, total_par, hole_ratings)
+          VALUES ($1::uuid, 'Duplicate Me', 71.0, 125, 4, '[]'::jsonb)
+          """,
+          [Ecto.UUID.dump!(tee_set.id)]
+        )
+      end
+
+    refute malformed_error.postgres.code == :unique_violation and
+             malformed_error.postgres.constraint == @duplicate_profile_constraint
   end
 
   test "PostgreSQL rejects TeeSet rows referencing a nonexistent Course" do
@@ -268,16 +366,20 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
   end
 
   test "PostgreSQL rejects TeeRatingProfile rows referencing a nonexistent TeeSet" do
-    assert_raise Postgrex.Error, fn ->
-      Repo.query!(
-        """
-        INSERT INTO tee_rating_profiles
-          (tee_set_id, rating_label, course_rating, slope_rating, total_par, hole_ratings)
-        VALUES ($1::uuid, 'Orphan', 70.0, 120, 72, '[]'::jsonb)
-        """,
-        [Ecto.UUID.dump!(Ecto.UUID.generate())]
-      )
-    end
+    orphan_error =
+      assert_raise Postgrex.Error, fn ->
+        Repo.query!(
+          """
+          INSERT INTO tee_rating_profiles
+            (tee_set_id, rating_label, course_rating, slope_rating, total_par)
+          VALUES ($1::uuid, 'Orphan', 70.0, 120, 72)
+          """,
+          [Ecto.UUID.dump!(Ecto.UUID.generate())]
+        )
+      end
+
+    assert orphan_error.postgres.code == :foreign_key_violation
+    assert orphan_error.postgres.constraint == @orphan_tee_set_fkey
   end
 
   test "configure_tee_rating_profile rejects CourseHole from another Course" do
@@ -312,7 +414,7 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
                  slope_rating: 125,
                  total_par: 4,
                  hole_ratings: [
-                   %{course_hole_id: hole_b.id, par: 4, stroke_index: 1, distance_mm: 350_000}
+                   %{course_hole_id: hole_b.id, par: 4, stroke_index: 1, distance_m: 350}
                  ]
                },
                actor: admin
@@ -334,8 +436,8 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
                  slope_rating: 125,
                  total_par: 8,
                  hole_ratings: [
-                   %{course_hole_id: hole.id, par: 4, stroke_index: 1, distance_mm: 350_000},
-                   %{course_hole_id: hole.id, par: 5, stroke_index: 2, distance_mm: 360_000}
+                   %{course_hole_id: hole.id, par: 4, stroke_index: 1, distance_m: 350},
+                   %{course_hole_id: hole.id, par: 5, stroke_index: 2, distance_m: 360}
                  ]
                },
                actor: admin
@@ -452,7 +554,7 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
       slope_rating: slope_rating,
       total_par: total_par,
       hole_ratings: [
-        %{course_hole_id: hole.id, par: 4, stroke_index: 1, distance_mm: 350_000}
+        %{course_hole_id: hole.id, par: 4, stroke_index: 1, distance_m: 350}
       ]
     }
   end
@@ -547,5 +649,67 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
     ])
 
     Repo.get!(GolfScoring.Accounts.StaffUser, staff.id)
+  end
+
+  defp start_course_archive_blocker(course_id) do
+    parent = self()
+    Task.async(fn -> hold_course_archive_lock(parent, course_id) end)
+  end
+
+  defp hold_course_archive_lock(parent, course_id) do
+    Sandbox.unboxed_run(Repo, fn ->
+      Repo.transaction(fn ->
+        Repo.query!("SELECT id FROM courses WHERE id = $1::uuid FOR UPDATE", [
+          Ecto.UUID.dump!(course_id)
+        ])
+
+        Repo.query!("UPDATE courses SET status = 'archived' WHERE id = $1::uuid", [
+          Ecto.UUID.dump!(course_id)
+        ])
+
+        send(parent, {:gls11_course_archive_locked, database_backend_pid()})
+
+        receive do
+          :release_gls11_course_archive -> :released
+        after
+          15_000 -> Repo.rollback(:course_archive_blocker_timeout)
+        end
+      end)
+    end)
+  end
+
+  defp start_independent_operation(tag, operation) do
+    parent = self()
+
+    Task.async(fn ->
+      Sandbox.unboxed_run(Repo, fn ->
+        send(parent, {tag, database_backend_pid()})
+        operation.()
+      end)
+    end)
+  end
+
+  defp await_blocker!(blocker, tag) do
+    assert_receive {^tag, backend_pid}, 5_000
+    assert blocker.pid != self()
+    backend_pid
+  end
+
+  defp await_operation_pids(tags) do
+    Enum.map(tags, fn tag ->
+      assert_receive {^tag, backend_pid}, 5_000
+      backend_pid
+    end)
+  end
+
+  defp database_backend_pid do
+    Repo.query!("SELECT pg_backend_pid()").rows |> hd() |> hd()
+  end
+
+  defp release_course_blocker(blocker) do
+    if Process.alive?(blocker.pid) do
+      send(blocker.pid, :release_gls11_course_archive)
+      Task.await(blocker, 10_000)
+    end
   end
 end
