@@ -40,8 +40,9 @@ defmodule GolfScoring.GolfCatalog.TeeSet do
 
       validate present([:course_id, :name])
 
-      validate {GolfScoring.GolfCatalog.Validations.ReferencedCourseActiveInDatabase,
-                before_action?: true}
+      validate GolfScoring.GolfCatalog.Validations.ReferencedCourseActiveInDatabase do
+        before_action? true
+      end
     end
   end
 

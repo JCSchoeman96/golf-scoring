@@ -8,6 +8,7 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
   alias GolfScoring.Accounts.EventStaffAssignment
   alias GolfScoring.Competition.Event
   alias GolfScoring.GolfCatalog
+  alias GolfScoring.GolfCatalog.Course
   alias GolfScoring.GolfCatalog.TeeRatingProfile
   alias GolfScoring.GolfCatalog.TeeSet
   alias GolfScoring.Repo
@@ -16,12 +17,17 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
   @duplicate_profile_constraint "tee_rating_profiles_unique_rating_context_per_tee_set_index"
   @orphan_tee_set_fkey "tee_rating_profiles_tee_set_id_fkey"
 
-  setup do
+  setup tags do
     Process.put(:gls11_email_prefix, "gls11-#{Ecto.UUID.generate()}")
     on_exit(fn -> Process.delete(:gls11_email_prefix) end)
 
-    owner = Sandbox.start_owner!(Repo, shared: true)
-    on_exit(fn -> Sandbox.stop_owner(owner) end)
+    if tags[:real_concurrency] do
+      :ok = Sandbox.mode(Repo, :auto)
+      on_exit(fn -> Sandbox.mode(Repo, :manual) end)
+    else
+      owner = Sandbox.start_owner!(Repo, shared: true)
+      on_exit(fn -> Sandbox.stop_owner(owner) end)
+    end
 
     :ok
   end
@@ -98,15 +104,11 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
       GolfCatalog.create_course(event.id, %{name: "Race Course", location: "ZA"}, actor: admin)
 
     blocker = start_course_archive_blocker(course.id)
-    blocker_pid = await_blocker!(blocker, :gls11_course_archive_locked)
+    archive_backend_pid = await_blocker!(blocker, :gls11_course_archive_locked)
 
     try do
-      parent = self()
-
       task =
         start_independent_operation(:gls11_configure_tee_set_race, fn ->
-          Process.put(:gls11_course_lock_probe_parent, parent)
-
           GolfCatalog.configure_tee_set(
             event.id,
             %{course_id: course.id, name: "Blue"},
@@ -114,14 +116,25 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
           )
         end)
 
-      [operation_pid] = await_operation_pids([:gls11_configure_tee_set_race])
-      refute blocker_pid == operation_pid
+      [reported_configure_backend_pid] = await_operation_pids([:gls11_configure_tee_set_race])
 
-      assert_receive :gls11_course_lock_attempt, 5_000
+      configure_backend_pid =
+        await_configure_blocked_by_archive!(
+          archive_backend_pid,
+          reported_configure_backend_pid
+        )
+
+      refute archive_backend_pid == configure_backend_pid
+
+      await_pg_blocking!(configure_backend_pid, archive_backend_pid)
+
+      assert_configure_backend_waiting_on_lock!(configure_backend_pid)
 
       send(blocker.pid, :release_gls11_course_archive)
       assert {:ok, :released} = Task.await(blocker, 10_000)
       assert {:error, _error} = Task.await(task, 10_000)
+
+      assert Repo.get!(Course, course.id).status == :archived
 
       assert Repo.query!(
                "SELECT 1 FROM tee_sets WHERE course_id = $1::uuid AND name = 'Blue'",
@@ -129,6 +142,7 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
              ).rows == []
     after
       release_course_blocker(blocker)
+      cleanup_committed_catalog_fixture(event.id, course.id, admin.id)
     end
   end
 
@@ -689,6 +703,83 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
     end)
   end
 
+  defp await_configure_blocked_by_archive!(archive_backend_pid, reported_configure_backend_pid) do
+    deadline = System.monotonic_time(:millisecond) + 5_000
+
+    do_await_configure_blocked_by_archive!(
+      archive_backend_pid,
+      reported_configure_backend_pid,
+      deadline
+    )
+  end
+
+  defp do_await_configure_blocked_by_archive!(
+         archive_backend_pid,
+         reported_configure_backend_pid,
+         deadline
+       ) do
+    blocked_pids = pids_blocked_by(archive_backend_pid)
+
+    configure_backend_pid =
+      cond do
+        reported_configure_backend_pid in blocked_pids ->
+          reported_configure_backend_pid
+
+        blocked_pids != [] ->
+          hd(blocked_pids)
+
+        true ->
+          nil
+      end
+
+    if configure_backend_pid &&
+         archive_backend_pid in pg_blocking_pids(configure_backend_pid) do
+      configure_backend_pid
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        activity = pg_stat_activity(reported_configure_backend_pid)
+
+        flunk(
+          "expected archive backend #{archive_backend_pid} to block configure, blocked_pids=#{inspect(blocked_pids)}, reported_configure_backend_pid=#{reported_configure_backend_pid}, activity=#{inspect(activity)}"
+        )
+      else
+        Process.sleep(10)
+
+        do_await_configure_blocked_by_archive!(
+          archive_backend_pid,
+          reported_configure_backend_pid,
+          deadline
+        )
+      end
+    end
+  end
+
+  defp pids_blocked_by(blocker_pid) do
+    Sandbox.unboxed_run(Repo, fn ->
+      blocker_pid
+      |> pids_blocked_by_query()
+      |> map_activity_pids()
+    end)
+  end
+
+  defp pids_blocked_by_query(blocker_pid) do
+    Repo.query!(
+      """
+      SELECT pid
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND pid IS NOT NULL
+        AND pid <> $1::int
+        AND $1::int = ANY(pg_blocking_pids(pid))
+      ORDER BY pid
+      """,
+      [blocker_pid]
+    ).rows
+  end
+
+  defp map_activity_pids(rows) when is_list(rows), do: Enum.map(rows, fn [pid] -> pid end)
+  defp map_activity_pids(_), do: []
+
   defp await_blocker!(blocker, tag) do
     assert_receive {^tag, backend_pid}, 5_000
     assert blocker.pid != self()
@@ -702,6 +793,63 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
     end)
   end
 
+  defp await_pg_blocking!(blocked_pid, expected_blocker_pid, timeout_ms \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_await_pg_blocking!(blocked_pid, expected_blocker_pid, deadline)
+  end
+
+  defp do_await_pg_blocking!(blocked_pid, expected_blocker_pid, deadline) do
+    blockers = pg_blocking_pids(blocked_pid)
+
+    if expected_blocker_pid in blockers do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        activity = pg_stat_activity(blocked_pid)
+
+        flunk(
+          "expected PostgreSQL backend #{expected_blocker_pid} to block #{blocked_pid}, pg_blocking_pids=#{inspect(blockers)}, activity=#{inspect(activity)}"
+        )
+      else
+        Process.sleep(10)
+        do_await_pg_blocking!(blocked_pid, expected_blocker_pid, deadline)
+      end
+    end
+  end
+
+  defp pg_stat_activity(pid) do
+    Sandbox.unboxed_run(Repo, fn ->
+      case Repo.query!(
+             "SELECT state, wait_event_type, wait_event, left(query, 120) FROM pg_stat_activity WHERE pid = $1::int",
+             [pid]
+           ).rows do
+        [[state, wait_event_type, wait_event, query]] ->
+          %{state: state, wait_event_type: wait_event_type, wait_event: wait_event, query: query}
+
+        _ ->
+          :not_found
+      end
+    end)
+  end
+
+  defp pg_blocking_pids(pid) do
+    Sandbox.unboxed_run(Repo, fn ->
+      case Repo.query!("SELECT pg_blocking_pids($1::int)", [pid]).rows do
+        [[nil]] -> []
+        [[blockers]] when is_list(blockers) -> blockers
+        _ -> []
+      end
+    end)
+  end
+
+  defp assert_configure_backend_waiting_on_lock!(configure_backend_pid) do
+    activity = pg_stat_activity(configure_backend_pid)
+
+    assert activity.wait_event_type == "Lock"
+    assert activity.query =~ "FOR SHARE"
+    assert activity.query =~ "courses"
+  end
+
   defp database_backend_pid do
     Repo.query!("SELECT pg_backend_pid()").rows |> hd() |> hd()
   end
@@ -711,5 +859,25 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
       send(blocker.pid, :release_gls11_course_archive)
       Task.await(blocker, 10_000)
     end
+  end
+
+  defp cleanup_committed_catalog_fixture(event_id, course_id, staff_id) do
+    Sandbox.unboxed_run(Repo, fn ->
+      Repo.query!("DELETE FROM tee_sets WHERE course_id = $1::uuid", [Ecto.UUID.dump!(course_id)])
+
+      Repo.query!("DELETE FROM course_holes WHERE course_id = $1::uuid", [
+        Ecto.UUID.dump!(course_id)
+      ])
+
+      Repo.query!("DELETE FROM courses WHERE id = $1::uuid", [Ecto.UUID.dump!(course_id)])
+
+      Repo.query!("DELETE FROM event_staff_assignments WHERE event_id = $1::uuid", [
+        Ecto.UUID.dump!(event_id)
+      ])
+
+      Repo.query!("DELETE FROM events WHERE id = $1::uuid", [Ecto.UUID.dump!(event_id)])
+
+      Repo.query!("DELETE FROM staff_users WHERE id = $1::uuid", [Ecto.UUID.dump!(staff_id)])
+    end)
   end
 end

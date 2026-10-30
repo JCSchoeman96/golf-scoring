@@ -19,20 +19,10 @@ defmodule GolfScoring.GolfCatalog.Validations.ReferencedCourseActiveInDatabase d
         :ok
 
       course_id ->
-        notify_course_lock_probe()
-
         case lock_and_verify_active(course_id) do
           :ok -> :ok
           :error -> {:error, field: :course_id, message: message}
         end
-    end
-  end
-
-  defp notify_course_lock_probe do
-    case Process.get(:gls11_course_lock_probe_parent) do
-      nil -> :ok
-      pid when is_pid(pid) -> send(pid, :gls11_course_lock_attempt)
-      _ -> :ok
     end
   end
 
