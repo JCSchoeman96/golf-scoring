@@ -58,6 +58,7 @@ defmodule GolfScoring.MixProject do
       {:ash_authentication, "~> 4.15.0"},
       {:ash_authentication_phoenix, "~> 2.17.0"},
       {:ash, "~> 3.0"},
+      {:picosat_elixir, "~> 0.2"},
       {:igniter, "~> 0.6", only: [:dev, :test]},
       {:phoenix, "~> 1.8.16"},
       {:phoenix_html, "~> 4.1"},

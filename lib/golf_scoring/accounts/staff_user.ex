@@ -4,6 +4,7 @@ defmodule GolfScoring.Accounts.StaffUser do
   use Ash.Resource,
     domain: GolfScoring.Accounts,
     data_layer: AshPostgres.DataLayer,
+    authorizers: [Ash.Policy.Authorizer],
     extensions: [AshAuthentication]
 
   postgres do
@@ -50,6 +51,24 @@ defmodule GolfScoring.Accounts.StaffUser do
       get? true
     end
 
+    update :grant_system_admin do
+      public? false
+      accept []
+      transaction? true
+      require_atomic? false
+      atomic_upgrade? false
+      change {GolfScoring.Accounts.SystemAdminGuard, operation: :grant}
+    end
+
+    update :revoke_system_admin do
+      public? false
+      accept []
+      transaction? true
+      require_atomic? false
+      atomic_upgrade? false
+      change {GolfScoring.Accounts.SystemAdminGuard, operation: :revoke}
+    end
+
     create :provision_staff_user do
       public? false
       accept [:email]
@@ -89,6 +108,24 @@ defmodule GolfScoring.Accounts.StaffUser do
       prepare AshAuthentication.Strategy.Password.SignInPreparation
 
       get? true
+    end
+  end
+
+  policies do
+    bypass AshAuthentication.Checks.AshAuthenticationInteraction do
+      authorize_if always()
+    end
+
+    policy action(:grant_system_admin) do
+      access_type :strict
+      forbid_unless actor_attribute_equals(:status, :active)
+      authorize_if actor_attribute_equals(:system_admin, true)
+    end
+
+    policy action(:revoke_system_admin) do
+      access_type :strict
+      forbid_unless actor_attribute_equals(:status, :active)
+      authorize_if actor_attribute_equals(:system_admin, true)
     end
   end
 
