@@ -53,6 +53,13 @@ defmodule GolfScoring.Accounts.EventStaffAssignment do
       change {GolfScoring.Accounts.EventStaffAssignmentGuard, operation: :assign}
     end
 
+    create :create_initial_event_admin_internal do
+      public? false
+      accept [:event_id, :staff_user_id]
+      transaction? true
+      change GolfScoring.Accounts.Changes.BootstrapInitialEventAdmin
+    end
+
     update :revoke_event_staff_role do
       public? false
       accept []
