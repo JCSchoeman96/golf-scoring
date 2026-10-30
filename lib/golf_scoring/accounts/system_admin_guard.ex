@@ -31,6 +31,10 @@ defmodule GolfScoring.Accounts.SystemAdminGuard do
 
   @doc false
   def acquire_lock!(repo \\ Repo) do
+    unless repo.in_transaction?() do
+      raise ArgumentError, "SYSTEM_ADMIN advisory lock requires an open repository transaction"
+    end
+
     repo.query!("SELECT pg_advisory_xact_lock($1, $2)", [@lock_namespace, @lock_identity])
     :ok
   end

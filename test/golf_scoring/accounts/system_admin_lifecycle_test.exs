@@ -24,6 +24,22 @@ defmodule GolfScoring.Accounts.SystemAdminLifecycleTest do
     :ok
   end
 
+  @tag :lock_transaction_guard
+  test "the shared lock requires an explicit repository transaction" do
+    assert_raise ArgumentError, ~r/SYSTEM_ADMIN.*transaction/i, fn ->
+      SystemAdminGuard.acquire_lock!()
+    end
+  end
+
+  @tag :lock_transaction_guard
+  test "the shared lock is acquired inside an explicit repository transaction" do
+    assert {:ok, :ok} =
+             Repo.transaction(fn ->
+               :ok = SystemAdminGuard.acquire_lock!()
+             end)
+  end
+
+  @tag :credential_safe_action_results
   test "active system admin grants an active staff user with one safe audit event" do
     actor = create_system_admin!()
     target = create_staff_user!()
@@ -31,6 +47,7 @@ defmodule GolfScoring.Accounts.SystemAdminLifecycleTest do
     assert {:ok, updated_target} = Accounts.grant_system_admin(target, actor: actor)
 
     assert updated_target.system_admin
+    assert %Ash.NotLoaded{field: :hashed_password} = updated_target.hashed_password
 
     assert %Postgrex.Result{
              rows: [["system_admin_granted", actor_id, "staff_user", target_id, changes, context]],
@@ -58,6 +75,25 @@ defmodule GolfScoring.Accounts.SystemAdminLifecycleTest do
     target = create_staff_user!()
 
     assert {:error, %Ash.Error.Forbidden{}} = Accounts.grant_system_admin(target, actor: actor)
+    refute Repo.get!(StaffUser, target.id).system_admin
+    assert audit_events(target.id) == []
+  end
+
+  @tag :stale_actor_capability_recheck
+  test "a stale SYSTEM_ADMIN actor cannot grant after losing the database capability" do
+    stale_actor = create_system_admin!()
+    target = create_staff_user!()
+
+    assert stale_actor.system_admin
+
+    assert %Postgrex.Result{num_rows: 1} =
+             Repo.query!(
+               "UPDATE staff_users SET system_admin = FALSE WHERE id = $1::uuid",
+               [Ecto.UUID.dump!(stale_actor.id)]
+             )
+
+    assert stale_actor.system_admin
+    assert {:error, _error} = Accounts.grant_system_admin(target, actor: stale_actor)
     refute Repo.get!(StaffUser, target.id).system_admin
     assert audit_events(target.id) == []
   end
@@ -115,6 +151,7 @@ defmodule GolfScoring.Accounts.SystemAdminLifecycleTest do
     assert audit_events(target.id) == []
   end
 
+  @tag :credential_safe_action_results
   test "an active SYSTEM_ADMIN can revoke another while one remains" do
     actor = create_system_admin!()
     target = create_system_admin!()
@@ -122,6 +159,7 @@ defmodule GolfScoring.Accounts.SystemAdminLifecycleTest do
     assert {:ok, updated_target} = Accounts.revoke_system_admin(target, actor: actor)
 
     refute updated_target.system_admin
+    assert %Ash.NotLoaded{field: :hashed_password} = updated_target.hashed_password
     assert Repo.get!(StaffUser, actor.id).system_admin
     assert [event] = audit_events(target.id)
     assert Enum.at(event, 0) == "system_admin_revoked"
