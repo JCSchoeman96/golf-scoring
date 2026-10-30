@@ -11,5 +11,10 @@ defmodule GolfScoring.Accounts do
       define :reactivate_staff_user, action: :reactivate_staff_user
       define :disable_staff_user, action: :disable_staff_user
     end
+
+    resource GolfScoring.Accounts.EventStaffAssignment do
+      define :assign_event_staff_role, action: :assign_event_staff_role
+      define :revoke_event_staff_role, action: :revoke_event_staff_role
+    end
   end
 end
