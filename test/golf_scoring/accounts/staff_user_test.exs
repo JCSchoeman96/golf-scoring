@@ -98,15 +98,22 @@ defmodule GolfScoring.Accounts.StaffUserTest do
   end
 
   test "persists only the specified lifecycle values" do
-    for status <- [:active, :suspended, :disabled] do
-      assert {:ok, user} = create_staff_user(%{status: status})
-      assert user.status == status
+    for status <- ["active", "suspended", "disabled"] do
+      assert %Postgrex.Result{rows: [[^status]]} =
+               Repo.query!(
+                 "INSERT INTO staff_users (email, status, hashed_password) VALUES ($1, $2, $3) RETURNING status",
+                 [unique_email(), status, "test-hash"]
+               )
     end
   end
 
-  test "rejects invalid lifecycle values in Ash and PostgreSQL" do
-    assert {:error, _error} = create_staff_user(%{status: :pending})
+  test "does not allow provisioning suspended or disabled staff users" do
+    for requested_status <- [:suspended, :disabled] do
+      assert {:error, _error} = create_staff_user(%{status: requested_status})
+    end
+  end
 
+  test "PostgreSQL rejects invalid lifecycle values" do
     assert_raise Postgrex.Error, fn ->
       Repo.query!(
         "INSERT INTO staff_users (email, status, hashed_password) VALUES ($1, $2, $3)",
@@ -141,10 +148,33 @@ defmodule GolfScoring.Accounts.StaffUserTest do
              create_staff_user(%{password_confirmation: "A different passphrase"})
   end
 
+  test "requires 15 characters in both password arguments" do
+    short_password = String.duplicate("a", 14)
+    valid_password = String.duplicate("a", 15)
+    provision_action = Ash.Resource.Info.action(StaffUser, :provision_staff_user)
+
+    for argument_name <- [:password, :password_confirmation] do
+      argument = Enum.find(provision_action.arguments, &(&1.name == argument_name))
+      assert Keyword.fetch!(argument.constraints, :min_length) == 15
+    end
+
+    assert {:error, _error} =
+             create_staff_user(%{
+               password: short_password,
+               password_confirmation: short_password
+             })
+
+    assert {:ok, _user} =
+             create_staff_user(%{
+               password: valid_password,
+               password_confirmation: valid_password
+             })
+  end
+
   test "allows password authentication only for active staff" do
     strategy = AshAuthentication.Info.strategy!(StaffUser, :password)
     active_email = unique_email()
-    assert {:ok, _active_user} = create_staff_user(%{email: active_email, status: :active})
+    assert {:ok, _active_user} = create_staff_user(%{email: active_email})
 
     assert {:ok, _user} =
              Actions.sign_in(
@@ -155,7 +185,13 @@ defmodule GolfScoring.Accounts.StaffUserTest do
 
     for status <- [:suspended, :disabled] do
       email = unique_email()
-      assert {:ok, _user} = create_staff_user(%{email: email, status: status})
+      assert {:ok, user} = create_staff_user(%{email: email})
+
+      assert %Postgrex.Result{num_rows: 1} =
+               Repo.query!(
+                 "UPDATE staff_users SET status = $1 WHERE email::text = $2",
+                 [Atom.to_string(status), to_string(user.email)]
+               )
 
       assert {:error, _error} =
                Actions.sign_in(
@@ -180,13 +216,20 @@ defmodule GolfScoring.Accounts.StaffUserTest do
 
   test "does not expose registration or unrestricted protected-field updates" do
     strategy = AshAuthentication.Info.strategy!(StaffUser, :password)
+    read_action = Ash.Resource.Info.action(StaffUser, :read)
+    subject_action = Ash.Resource.Info.action(StaffUser, :get_by_subject)
+    sign_in_action = Ash.Resource.Info.action(StaffUser, :sign_in_with_password)
     provision_action = Ash.Resource.Info.action(StaffUser, :provision_staff_user)
     hashed_password = Ash.Resource.Info.attribute(StaffUser, :hashed_password)
     system_admin = Ash.Resource.Info.attribute(StaffUser, :system_admin)
 
     refute strategy.registration_enabled?
     assert is_nil(Ash.Resource.Info.action(StaffUser, :register_with_password))
+    refute read_action.public?
+    refute subject_action.public?
+    assert sign_in_action.public?
     refute provision_action.public?
+    refute :status in provision_action.accept
     assert is_nil(Ash.Resource.Info.action(StaffUser, :update))
     assert is_nil(Ash.Resource.Info.action(StaffUser, :destroy))
     assert hashed_password.sensitive?
@@ -195,12 +238,25 @@ defmodule GolfScoring.Accounts.StaffUserTest do
     refute system_admin.writable?
   end
 
+  test "does not enable authentication token generation" do
+    refute AshAuthentication.Info.authentication_tokens_enabled?(StaffUser)
+  end
+
+  test "AshAuthentication resolves staff users through the subject read action" do
+    assert {:ok, user} = create_staff_user()
+    subject = AshAuthentication.user_to_subject(user)
+
+    assert {:ok, resolved_user} =
+             AshAuthentication.subject_to_user(subject, StaffUser, authorize?: false)
+
+    assert resolved_user.id == user.id
+  end
+
   defp create_staff_user(overrides \\ %{}) do
     attrs =
       Map.merge(
         %{
           email: unique_email(),
-          status: :active,
           password: @password,
           password_confirmation: @password
         },

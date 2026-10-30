@@ -18,6 +18,11 @@ defmodule GolfScoring.Accounts.StaffUser do
   end
 
   authentication do
+    tokens do
+      enabled?(false)
+      token_resource(false)
+    end
+
     strategies do
       password :password do
         identity_field(:email)
@@ -29,22 +34,33 @@ defmodule GolfScoring.Accounts.StaffUser do
   end
 
   actions do
-    defaults [:read]
+    read :read do
+      public? false
+      primary? true
+    end
+
+    read :get_by_subject do
+      public? false
+      argument :subject, :string, allow_nil?: false
+      prepare AshAuthentication.Preparations.FilterBySubject
+      get? true
+    end
 
     create :provision_staff_user do
       public? false
-      accept [:email, :status]
+      accept [:email]
+      change set_attribute(:status, :active)
 
       argument :password, :string do
         allow_nil? false
         sensitive? true
-        constraints min_length: 8
+        constraints min_length: 15
       end
 
       argument :password_confirmation, :string do
         allow_nil? false
         sensitive? true
-        constraints min_length: 8
+        constraints min_length: 15
       end
 
       validate {AshAuthentication.Strategy.Password.PasswordConfirmationValidation,
@@ -54,6 +70,8 @@ defmodule GolfScoring.Accounts.StaffUser do
     end
 
     read :sign_in_with_password do
+      public? true
+
       argument :email, :ci_string do
         allow_nil? false
       end
