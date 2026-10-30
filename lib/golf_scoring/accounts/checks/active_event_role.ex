@@ -14,7 +14,11 @@ defmodule GolfScoring.Accounts.Checks.ActiveEventRole do
   @impl true
   def match?(actor, context, opts) do
     actor_id = if is_map(actor), do: Map.get(actor, :id), else: nil
-    event_id = subject_event_id(Map.get(context, :subject), Map.get(context, :resource))
+
+    event_id =
+      subject_event_id(Map.get(context, :subject), Map.get(context, :resource)) ||
+        subject_event_id(Map.get(context, :changeset), Map.get(context, :resource))
+
     roles = opts[:roles] || List.wrap(opts[:role])
 
     authorized?(actor_id, event_id, roles)
@@ -51,9 +55,16 @@ defmodule GolfScoring.Accounts.Checks.ActiveEventRole do
     end
   end
 
-  defp subject_event_id(%{resource: resource, data: %{id: event_id}}, _context_resource)
-       when resource == GolfScoring.Competition.Event do
-    event_id
+  defp subject_event_id(%Ash.Changeset{} = changeset, _context_resource) do
+    Ash.Changeset.get_argument(changeset, :event_id) ||
+      Map.get(changeset.attributes, :event_id) ||
+      event_record_id(changeset.resource, changeset.data) ||
+      Map.get(changeset.data, :event_id)
+  end
+
+  defp subject_event_id(%{resource: resource, data: data}, _context_resource) do
+    event_record_id(resource, data) ||
+      Map.get(data, :event_id)
   end
 
   defp subject_event_id(%{attributes: attributes, data: data}, _context_resource) do
@@ -62,7 +73,19 @@ defmodule GolfScoring.Accounts.Checks.ActiveEventRole do
 
   defp subject_event_id(%{event_id: event_id}, _context_resource), do: event_id
 
-  defp subject_event_id(%{id: event_id}, GolfScoring.Competition.Event), do: event_id
+  defp subject_event_id(%{id: event_id}, resource) when is_atom(resource) do
+    if competition_event_resource?(resource), do: event_id
+  end
 
   defp subject_event_id(_, _), do: nil
+
+  defp event_record_id(resource, %{id: event_id, state: _}) do
+    if competition_event_resource?(resource), do: event_id
+  end
+
+  defp event_record_id(_resource, _data), do: nil
+
+  defp competition_event_resource?(resource) do
+    resource |> Module.split() |> Enum.take(-2) == ["Competition", "Event"]
+  end
 end
