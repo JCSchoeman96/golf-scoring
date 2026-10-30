@@ -18,6 +18,9 @@ defmodule GolfScoring.Accounts.StaffUser do
   end
 
   authentication do
+    # The generic sign-in form slugifies multiword subjects before submitting them.
+    subject_name(:staffuser)
+
     tokens do
       enabled?(false)
       token_resource(false)
@@ -42,6 +45,7 @@ defmodule GolfScoring.Accounts.StaffUser do
     read :get_by_subject do
       public? false
       argument :subject, :string, allow_nil?: false
+      prepare build(filter: [status: :active])
       prepare AshAuthentication.Preparations.FilterBySubject
       get? true
     end

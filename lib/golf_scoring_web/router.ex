@@ -1,5 +1,8 @@
 defmodule GolfScoringWeb.Router do
   use GolfScoringWeb, :router
+  use AshAuthentication.Phoenix.Router
+
+  import AshAuthentication.Plug.Helpers, only: [set_actor: 2]
 
   @browser_headers %{
     "content-security-policy" =>
@@ -9,6 +12,9 @@ defmodule GolfScoringWeb.Router do
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
+    plug :load_from_session
+    plug :set_actor, :staffuser
+    plug :assign_current_staff_user
     plug :fetch_live_flash
     plug :put_root_layout, html: {GolfScoringWeb.Layouts, :root}
     plug :protect_from_forgery
@@ -16,14 +22,46 @@ defmodule GolfScoringWeb.Router do
     plug :put_secure_browser_headers, @browser_headers
   end
 
+  pipeline :require_staff do
+    plug GolfScoringWeb.Admin.RequireStaff
+  end
+
   pipeline :api do
     plug :accepts, ["json"]
+  end
+
+  def assign_current_staff_user(conn, _opts) do
+    assign(conn, :current_staff_user, conn.assigns[:current_staffuser])
   end
 
   scope "/", GolfScoringWeb do
     pipe_through :browser
 
     get "/", PageController, :home
+  end
+
+  scope "/admin" do
+    pipe_through :browser
+
+    sign_in_route(
+      path: "/sign-in",
+      auth_routes_prefix: {:unscoped, "/admin/auth"},
+      resources: [GolfScoring.Accounts.StaffUser]
+    )
+
+    sign_out_route(GolfScoringWeb.Admin.SessionController, "/sign-out")
+
+    auth_routes(
+      GolfScoringWeb.Admin.SessionController,
+      GolfScoring.Accounts.StaffUser,
+      path: "/auth"
+    )
+  end
+
+  scope "/admin" do
+    pipe_through [:browser, :require_staff]
+
+    get "/", GolfScoringWeb.Admin.SessionController, :foundation
   end
 
   # Other scopes may use custom stacks.

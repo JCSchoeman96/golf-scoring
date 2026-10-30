@@ -8,6 +8,8 @@ defmodule GolfScoringWeb.Endpoint do
     store: :cookie,
     key: "_golf_scoring_key",
     signing_salt: "hG8JOr7+",
+    http_only: true,
+    secure: Mix.env() == :prod,
     same_site: "Lax"
   ]
 
