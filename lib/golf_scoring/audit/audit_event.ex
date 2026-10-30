@@ -1,5 +1,5 @@
 defmodule GolfScoring.Audit.AuditEvent do
-  @moduledoc "Append-only record of a structured staff-originated operational event."
+  @moduledoc "Append-only record of a structured operational event."
 
   use Ash.Resource,
     domain: GolfScoring.Audit,
@@ -40,6 +40,21 @@ defmodule GolfScoring.Audit.AuditEvent do
       ]
 
       validate present(:actor_staff_user_id)
+      validate {GolfScoring.Audit.Validations.NoSensitiveData, []}
+    end
+
+    create :record_system_event do
+      public? false
+
+      accept [
+        :action,
+        :target_type,
+        :target_id,
+        :context,
+        :changes,
+        :reason
+      ]
+
       validate {GolfScoring.Audit.Validations.NoSensitiveData, []}
     end
   end

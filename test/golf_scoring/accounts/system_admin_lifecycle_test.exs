@@ -253,17 +253,20 @@ defmodule GolfScoring.Accounts.SystemAdminLifecycleTest do
   test "grant and revoke actions are named and private" do
     grant = Info.action(StaffUser, :grant_system_admin)
     revoke = Info.action(StaffUser, :revoke_system_admin)
+    bootstrap = Info.action(StaffUser, :bootstrap_system_admin)
 
     refute grant.public?
     refute revoke.public?
+    refute bootstrap.public?
     assert grant.accept == []
     assert revoke.accept == []
+    assert bootstrap.accept == []
 
     assert Enum.sort(
              for action <- Info.actions(StaffUser),
                  action.type == :update,
                  do: action.name
-           ) == [:grant_system_admin, :revoke_system_admin]
+           ) == [:bootstrap_system_admin, :grant_system_admin, :revoke_system_admin]
   end
 
   test "audit failure rolls back the SYSTEM_ADMIN capability change" do

@@ -69,6 +69,13 @@ defmodule GolfScoring.Accounts.StaffUser do
       change {GolfScoring.Accounts.SystemAdminGuard, operation: :revoke}
     end
 
+    update :bootstrap_system_admin do
+      public? false
+      accept []
+      transaction? true
+      change set_attribute(:system_admin, true)
+    end
+
     create :provision_staff_user do
       public? false
       accept [:email]
