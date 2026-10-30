@@ -49,26 +49,54 @@ defmodule GolfScoring.Competition.Services.CreateEventTest do
     assert audit.context["initial_event_admin_staff_user_id"] == admin.id
   end
 
+  test "rejects Event creation when the actor struct is stale after SYSTEM_ADMIN revocation" do
+    actor_admin = create_system_admin!()
+    other_admin = create_system_admin!()
+    stale_actor = actor_admin
+
+    assert {:ok, revoked} = Accounts.revoke_system_admin(actor_admin, actor: other_admin)
+    assert revoked.system_admin == false
+
+    events_before = event_count()
+    assignments_before = assignment_count()
+    audits_before = audit_count("event_created")
+
+    assert stale_actor.system_admin == true
+    assert stale_actor.status == :active
+
+    assert {:error, :forbidden} = CreateEvent.create(stale_actor, %{})
+
+    assert event_count() == events_before
+    assert assignment_count() == assignments_before
+    assert audit_count("event_created") == audits_before
+  end
+
   test "ordinary active staff cannot create an Event" do
     staff = create_staff_user!()
+    events_before = event_count()
+    assignments_before = assignment_count()
+    audits_before = audit_count("event_created")
 
     assert {:error, :forbidden} = CreateEvent.create(staff, %{})
 
-    assert event_count() == 0
-    assert assignment_count() == 0
-    assert audit_count("event_created") == 0
+    assert event_count() == events_before
+    assert assignment_count() == assignments_before
+    assert audit_count("event_created") == audits_before
   end
 
   test "inactive SYSTEM_ADMIN cannot create an Event" do
     for status <- [:suspended, :disabled] do
       admin = create_system_admin!()
       set_staff_status!(admin, status)
+      events_before = event_count()
+      assignments_before = assignment_count()
+      audits_before = audit_count("event_created")
 
       assert {:error, :forbidden} = CreateEvent.create(Repo.get!(StaffUser, admin.id), %{})
 
-      assert event_count() == 0
-      assert assignment_count() == 0
-      assert audit_count("event_created") == 0
+      assert event_count() == events_before
+      assert assignment_count() == assignments_before
+      assert audit_count("event_created") == audits_before
     end
   end
 
@@ -134,6 +162,57 @@ defmodule GolfScoring.Competition.Services.CreateEventTest do
     assert event_count() == events_before
     assert assignment_count() == assignments_before
     assert audit_count("event_created") == audits_before
+  end
+
+  @tag :real_concurrency
+  test "blocks concurrent SYSTEM_ADMIN revocation until CreateEvent commits" do
+    :ok = Sandbox.mode(Repo, :auto)
+    Process.put(:gls13_concurrency_cleanup, {nil, nil, nil})
+
+    try do
+      creator = create_system_admin!()
+      other = create_system_admin!()
+      Process.put(:gls13_concurrency_cleanup, {nil, creator.id, other.id})
+      parent = self()
+
+      create_task =
+        Task.async(fn ->
+          Process.put(:gls13_create_event_pause_parent, parent)
+
+          Sandbox.unboxed_run(Repo, fn ->
+            CreateEvent.create(creator, %{"source" => "concurrency"})
+          end)
+        end)
+
+      assert_receive {:gls13_create_event_paused, create_backend_pid}, 10_000
+
+      revoke_task =
+        Task.async(fn ->
+          Sandbox.unboxed_run(Repo, fn ->
+            send(parent, {:gls13_revoke_backend, database_backend_pid()})
+            Accounts.revoke_system_admin(creator, actor: other)
+          end)
+        end)
+
+      assert_receive {:gls13_revoke_backend, revoke_backend_pid}, 10_000
+      assert await_blocked_by!(revoke_backend_pid, create_backend_pid)
+
+      send(create_task.pid, :gls13_create_event_continue)
+
+      assert {:ok, %{event: event}} = Task.await(create_task, 15_000)
+      Process.put(:gls13_concurrency_cleanup, {event.id, creator.id, other.id})
+      assert {:ok, revoked} = Task.await(revoke_task, 15_000)
+      assert revoked.system_admin == false
+      refute Repo.get!(StaffUser, creator.id).system_admin
+      assert event.state == :draft
+    after
+      {event_id, creator_id, other_id} =
+        Process.get(:gls13_concurrency_cleanup, {nil, nil, nil})
+
+      Process.delete(:gls13_concurrency_cleanup)
+      cleanup_concurrency_fixtures!(event_id, creator_id, other_id)
+      :ok = Sandbox.mode(Repo, :manual)
+    end
   end
 
   defp create_staff_user! do
@@ -245,5 +324,66 @@ defmodule GolfScoring.Competition.Services.CreateEventTest do
   defp drop_audit_failure_trigger! do
     Repo.query!("DROP TRIGGER IF EXISTS gls13_reject_create_event_audit ON audit_events")
     Repo.query!("DROP FUNCTION IF EXISTS gls13_reject_create_event_audit()")
+  end
+
+  defp database_backend_pid do
+    [[pid]] = Repo.query!("SELECT pg_backend_pid()").rows
+    pid
+  end
+
+  defp await_blocked_by!(blocked_pid, blocker_pid) do
+    deadline = System.monotonic_time(:millisecond) + 10_000
+    do_await_blocked_by!(blocked_pid, blocker_pid, deadline)
+  end
+
+  defp do_await_blocked_by!(blocked_pid, blocker_pid, deadline) do
+    blocking =
+      Repo.query!("SELECT pg_blocking_pids($1)", [blocked_pid]).rows
+      |> List.flatten()
+
+    cond do
+      blocker_pid in blocking ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk(
+          "expected backend #{blocked_pid} to wait on #{blocker_pid}, blocking=#{inspect(blocking)}"
+        )
+
+      true ->
+        Process.sleep(50)
+        do_await_blocked_by!(blocked_pid, blocker_pid, deadline)
+    end
+  end
+
+  defp cleanup_concurrency_fixtures!(event_id, creator_id, other_id) do
+    Sandbox.unboxed_run(Repo, fn ->
+      if event_id do
+        Repo.query!(
+          "DELETE FROM audit_events WHERE target_type = 'event' AND target_id = $1::uuid",
+          [Ecto.UUID.dump!(event_id)]
+        )
+
+        Repo.query!(
+          "DELETE FROM event_staff_assignments WHERE event_id = $1::uuid",
+          [Ecto.UUID.dump!(event_id)]
+        )
+
+        Repo.query!("DELETE FROM events WHERE id = $1::uuid", [Ecto.UUID.dump!(event_id)])
+      end
+
+      for staff_id <- Enum.reject([creator_id, other_id], &is_nil/1) do
+        Repo.query!("DELETE FROM audit_events WHERE actor_staff_user_id = $1::uuid", [
+          Ecto.UUID.dump!(staff_id)
+        ])
+
+        Repo.query!(
+          "DELETE FROM audit_events WHERE target_type = 'staff_user' AND target_id = $1::uuid",
+          [Ecto.UUID.dump!(staff_id)]
+        )
+
+        Repo.query!("DELETE FROM staff_users WHERE id = $1::uuid", [Ecto.UUID.dump!(staff_id)])
+      end
+    end)
   end
 end

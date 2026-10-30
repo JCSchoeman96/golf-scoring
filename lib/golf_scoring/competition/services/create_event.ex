@@ -11,23 +11,19 @@ defmodule GolfScoring.Competition.Services.CreateEvent do
 
   @doc false
   @spec create(StaffUser.t(), map()) :: {:ok, result()} | {:error, atom()}
-  def create(%StaffUser{} = actor, safe_context) when is_map(safe_context) do
-    case authorize(actor) do
-      :ok -> run_transaction(actor, safe_context)
-      {:error, reason} -> {:error, reason}
-    end
+  def create(%StaffUser{id: actor_id} = actor, safe_context) when is_map(safe_context) do
+    run_transaction(actor_id, actor, safe_context)
   end
 
   def create(_actor, _safe_context), do: {:error, :forbidden}
 
-  defp authorize(%StaffUser{status: :active, system_admin: true}), do: :ok
-  defp authorize(_), do: {:error, :forbidden}
-
-  defp run_transaction(actor, safe_context) do
+  defp run_transaction(actor_id, actor, safe_context) do
     transaction_result =
       try do
         Repo.transaction(fn ->
-          with {:ok, event} <- create_event(),
+          with :ok <- lock_and_authorize_actor(actor_id),
+               :ok <- synchronize_test_pause(:after_actor_lock),
+               {:ok, event} <- create_event(),
                {:ok, _assignment} <- create_initial_assignment(event, actor),
                :ok <- record_audit(event, actor, safe_context) do
             %{event: event}
@@ -46,6 +42,44 @@ defmodule GolfScoring.Competition.Services.CreateEvent do
       {:error, reason} -> {:error, safe_reason(reason)}
       _other -> {:error, :create_event_failed}
     end
+  end
+
+  defp lock_and_authorize_actor(actor_id) do
+    case Repo.query!(
+           """
+           SELECT status, system_admin
+           FROM staff_users
+           WHERE id = $1::uuid
+           FOR SHARE
+           """,
+           [Ecto.UUID.dump!(actor_id)]
+         ).rows do
+      [["active", true]] -> :ok
+      _ -> {:error, :forbidden}
+    end
+  rescue
+    _error -> {:error, :forbidden}
+  end
+
+  defp synchronize_test_pause(:after_actor_lock) do
+    case Process.get(:gls13_create_event_pause_parent) do
+      nil ->
+        :ok
+
+      parent when is_pid(parent) ->
+        send(parent, {:gls13_create_event_paused, database_backend_pid()})
+
+        receive do
+          :gls13_create_event_continue -> :ok
+        after
+          15_000 -> raise "create event test pause timeout"
+        end
+    end
+  end
+
+  defp database_backend_pid do
+    [[pid]] = Repo.query!("SELECT pg_backend_pid()").rows
+    pid
   end
 
   defp create_event do
@@ -92,7 +126,7 @@ defmodule GolfScoring.Competition.Services.CreateEvent do
   end
 
   defp safe_reason(reason)
-       when reason in [:event_create_failed, :assignment_failed, :audit_failed],
+       when reason in [:forbidden, :event_create_failed, :assignment_failed, :audit_failed],
        do: reason
 
   defp safe_reason(_reason), do: :create_event_failed
