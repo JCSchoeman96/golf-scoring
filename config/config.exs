@@ -54,7 +54,10 @@ config :spark,
     "Ash.Domain": [section_order: [:resources, :policies, :authorization, :domain, :execution]]
   ]
 
-config :golf_scoring, generators: [timestamp_type: :utc_datetime], ecto_repos: [GolfScoring.Repo]
+config :golf_scoring,
+  generators: [timestamp_type: :utc_datetime],
+  ecto_repos: [GolfScoring.Repo],
+  ash_domains: [GolfScoring.Accounts]
 
 # Configure the endpoint
 config :golf_scoring, GolfScoringWeb.Endpoint,

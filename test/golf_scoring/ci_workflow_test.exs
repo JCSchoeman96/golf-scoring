@@ -27,6 +27,19 @@ defmodule GolfScoring.CIWorkflowTest do
     assert :ex_unit in Keyword.get(Mix.Project.config()[:dialyzer], :plt_add_apps, [])
   end
 
+  test "Quality configures test database settings for Ash codegen" do
+    quality_job =
+      @workflow_path
+      |> File.read!()
+      |> String.split("  quality:\n", parts: 2)
+      |> List.last()
+      |> String.split("\n  security:\n", parts: 2)
+      |> hd()
+
+    assert quality_job =~
+             ~r/name: Verify Ash generated artifacts are current\s+env:\s+TEST_DATABASE_USERNAME: golf_scoring_ci\s+TEST_DATABASE_PASSWORD: golf_scoring_ci\s+TEST_DATABASE_HOST: localhost\s+TEST_DATABASE_PORT: "5432"\s+TEST_DATABASE_NAME: golf_scoring_test\s+run: mix ash.codegen --check/
+  end
+
   test "GitHub Actions runs the Phase 0 quality gate on pull requests and main pushes" do
     assert File.regular?(@workflow_path),
            "expected .github/workflows/ci.yml to define the repository CI workflow"

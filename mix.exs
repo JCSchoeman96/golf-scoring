@@ -55,6 +55,8 @@ defmodule GolfScoring.MixProject do
       {:sourceror, "~> 1.8", only: [:dev, :test]},
       {:ash_phoenix, "~> 2.0"},
       {:ash_postgres, "~> 2.0"},
+      {:ash_authentication, "~> 4.15.0"},
+      {:ash_authentication_phoenix, "~> 2.17.0"},
       {:ash, "~> 3.0"},
       {:igniter, "~> 0.6", only: [:dev, :test]},
       {:phoenix, "~> 1.8.16"},

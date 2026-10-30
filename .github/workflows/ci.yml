@@ -71,6 +71,12 @@ jobs:
         run: mix credo --strict
 
       - name: Verify Ash generated artifacts are current
+        env:
+          TEST_DATABASE_USERNAME: golf_scoring_ci
+          TEST_DATABASE_PASSWORD: golf_scoring_ci
+          TEST_DATABASE_HOST: localhost
+          TEST_DATABASE_PORT: "5432"
+          TEST_DATABASE_NAME: golf_scoring_test
         run: mix ash.codegen --check
 
       # PRs may restore trusted caches, but only main writes new caches.
