@@ -2071,9 +2071,9 @@ create :register_with_password do
   argument :password, :string, allow_nil?: false, sensitive?: true
   argument :first_name, :string, allow_nil?: false
 
-accept [:email, :first_name]
+  accept [:email, :first_name]
 
-change AshAuthentication.GenerateTokenChange
+  change AshAuthentication.GenerateTokenChange
   change AshAuthentication.Strategy.Password.HashPasswordChange
 end
 ```
