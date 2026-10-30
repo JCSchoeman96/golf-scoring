@@ -266,7 +266,15 @@ defmodule GolfScoring.Accounts.SystemAdminLifecycleTest do
              for action <- Info.actions(StaffUser),
                  action.type == :update,
                  do: action.name
-           ) == [:bootstrap_system_admin, :grant_system_admin, :revoke_system_admin]
+           ) ==
+             [
+               :bootstrap_system_admin,
+               :disable_staff_user,
+               :grant_system_admin,
+               :reactivate_staff_user,
+               :revoke_system_admin,
+               :suspend_staff_user
+             ]
   end
 
   test "audit failure rolls back the SYSTEM_ADMIN capability change" do
