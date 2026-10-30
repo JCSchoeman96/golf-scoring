@@ -5,6 +5,7 @@ defmodule GolfScoringWeb.Admin.SessionControllerTest do
   import Phoenix.LiveViewTest
 
   alias Ecto.Adapters.SQL.Sandbox
+  alias GolfScoring.Accounts
   alias GolfScoring.Accounts.StaffUser
   alias GolfScoring.Repo
   alias GolfScoringWeb.Router
@@ -87,7 +88,7 @@ defmodule GolfScoringWeb.Admin.SessionControllerTest do
 
   test "suspended staff cannot authenticate", %{conn: conn} do
     user = create_staff_user!()
-    suspend_staff_user!(user, :suspended)
+    transition_staff_user!(user, :suspended)
     {view, form} = sign_in_form(conn, user.email, @password)
 
     assert render_submit(form) =~ "phx-trigger-action"
@@ -102,7 +103,7 @@ defmodule GolfScoringWeb.Admin.SessionControllerTest do
 
   test "disabled staff cannot authenticate", %{conn: conn} do
     user = create_staff_user!()
-    suspend_staff_user!(user, :disabled)
+    transition_staff_user!(user, :disabled)
     {view, form} = sign_in_form(conn, user.email, @password)
 
     assert render_submit(form) =~ "phx-trigger-action"
@@ -153,7 +154,7 @@ defmodule GolfScoringWeb.Admin.SessionControllerTest do
   test "an existing session loses access after staff status becomes suspended", %{conn: conn} do
     user = create_staff_user!()
     conn = authenticate(conn, user.email)
-    suspend_staff_user!(user, :suspended)
+    transition_staff_user!(user, :suspended)
 
     conn = conn |> recycle() |> get("/admin")
 
@@ -164,7 +165,7 @@ defmodule GolfScoringWeb.Admin.SessionControllerTest do
   test "an existing session loses access after staff status becomes disabled", %{conn: conn} do
     user = create_staff_user!()
     conn = authenticate(conn, user.email)
-    suspend_staff_user!(user, :disabled)
+    transition_staff_user!(user, :disabled)
 
     conn = conn |> recycle() |> get("/admin")
 
@@ -289,11 +290,26 @@ defmodule GolfScoringWeb.Admin.SessionControllerTest do
     |> Ash.create!(authorize?: false)
   end
 
-  defp suspend_staff_user!(user, status) do
+  defp transition_staff_user!(user, :suspended) do
+    admin = create_system_admin!()
+    assert {:ok, suspended_user} = Accounts.suspend_staff_user(user, actor: admin)
+    assert suspended_user.status == :suspended
+  end
+
+  defp transition_staff_user!(user, :disabled) do
+    admin = create_system_admin!()
+    assert {:ok, disabled_user} = Accounts.disable_staff_user(user, actor: admin)
+    assert disabled_user.status == :disabled
+  end
+
+  defp create_system_admin! do
+    user = create_staff_user!()
+
     assert %Postgrex.Result{num_rows: 1} =
-             Repo.query!("UPDATE staff_users SET status = $1 WHERE id = $2::uuid", [
-               Atom.to_string(status),
+             Repo.query!("UPDATE staff_users SET system_admin = TRUE WHERE id = $1::uuid", [
                Ecto.UUID.dump!(user.id)
              ])
+
+    Repo.get!(StaffUser, user.id)
   end
 end

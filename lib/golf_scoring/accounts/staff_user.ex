@@ -69,6 +69,33 @@ defmodule GolfScoring.Accounts.StaffUser do
       change {GolfScoring.Accounts.SystemAdminGuard, operation: :revoke}
     end
 
+    update :suspend_staff_user do
+      public? false
+      accept []
+      transaction? true
+      require_atomic? false
+      atomic_upgrade? false
+      change {GolfScoring.Accounts.StaffLifecycleGuard, operation: :suspend}
+    end
+
+    update :reactivate_staff_user do
+      public? false
+      accept []
+      transaction? true
+      require_atomic? false
+      atomic_upgrade? false
+      change {GolfScoring.Accounts.StaffLifecycleGuard, operation: :reactivate}
+    end
+
+    update :disable_staff_user do
+      public? false
+      accept []
+      transaction? true
+      require_atomic? false
+      atomic_upgrade? false
+      change {GolfScoring.Accounts.StaffLifecycleGuard, operation: :disable}
+    end
+
     update :bootstrap_system_admin do
       public? false
       accept []
@@ -130,6 +157,24 @@ defmodule GolfScoring.Accounts.StaffUser do
     end
 
     policy action(:revoke_system_admin) do
+      access_type :strict
+      forbid_unless actor_attribute_equals(:status, :active)
+      authorize_if actor_attribute_equals(:system_admin, true)
+    end
+
+    policy action(:suspend_staff_user) do
+      access_type :strict
+      forbid_unless actor_attribute_equals(:status, :active)
+      authorize_if actor_attribute_equals(:system_admin, true)
+    end
+
+    policy action(:reactivate_staff_user) do
+      access_type :strict
+      forbid_unless actor_attribute_equals(:status, :active)
+      authorize_if actor_attribute_equals(:system_admin, true)
+    end
+
+    policy action(:disable_staff_user) do
       access_type :strict
       forbid_unless actor_attribute_equals(:status, :active)
       authorize_if actor_attribute_equals(:system_admin, true)
