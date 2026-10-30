@@ -57,7 +57,7 @@ config :spark,
 config :golf_scoring,
   generators: [timestamp_type: :utc_datetime],
   ecto_repos: [GolfScoring.Repo],
-  ash_domains: [GolfScoring.Accounts, GolfScoring.Audit]
+  ash_domains: [GolfScoring.Accounts, GolfScoring.Audit, GolfScoring.Competition]
 
 # Configure the endpoint
 config :golf_scoring, GolfScoringWeb.Endpoint,
