@@ -101,5 +101,6 @@ defmodule GolfScoring.GolfCatalog.Course do
 
   relationships do
     has_many :course_holes, GolfScoring.GolfCatalog.CourseHole
+    has_many :tee_sets, GolfScoring.GolfCatalog.TeeSet
   end
 end

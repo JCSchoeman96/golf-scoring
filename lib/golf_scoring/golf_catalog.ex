@@ -13,5 +13,15 @@ defmodule GolfScoring.GolfCatalog do
     resource GolfScoring.GolfCatalog.CourseHole do
       define :configure_course_hole, action: :configure_course_hole, args: [:event_id]
     end
+
+    resource GolfScoring.GolfCatalog.TeeSet do
+      define :configure_tee_set, action: :configure_tee_set, args: [:event_id]
+    end
+
+    resource GolfScoring.GolfCatalog.TeeRatingProfile do
+      define :configure_tee_rating_profile,
+        action: :configure_tee_rating_profile,
+        args: [:event_id]
+    end
   end
 end
