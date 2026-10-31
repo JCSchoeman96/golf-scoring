@@ -53,6 +53,95 @@ defmodule GolfScoring.Competition.RoundEntryTest do
     refute function_exported?(Competition, :update_round_entry, 2)
   end
 
+  test "replacement coordinator uses private internal Ash lifecycle actions only" do
+    assert Info.action(RoundEntry, :mark_replaced_before_start_internal)
+    assert Info.action(RoundEntry, :create_replacement_entry_internal)
+    refute function_exported?(Competition, :mark_replaced_before_start_internal, 1)
+    refute function_exported?(Competition, :create_replacement_entry_internal, 3)
+
+    create_round_entry_source =
+      File.read!("lib/golf_scoring/competition/changes/create_round_entry.ex")
+
+    replace_source = File.read!("lib/golf_scoring/competition/services/replace_round_entry.ex")
+
+    refute create_round_entry_source =~ "gls16_skip_entry_authorization"
+    refute replace_source =~ "UPDATE round_entries"
+    refute replace_source =~ ":add_round_entry"
+  end
+
+  test "registration lifecycle covers expected and checked_in source states" do
+    %{event: event, round: round, admin: admin} = setup_round!()
+    staff = create_staff_user!()
+    assign_role!(admin, event, staff, :registration_staff)
+
+    expected_player = create_player!()
+
+    assert {:ok, expected_entry} =
+             Competition.add_round_entry(event.id, round.id, expected_player.id, actor: admin)
+
+    assert {:ok, withdrawn} =
+             Competition.withdraw_before_start(expected_entry, actor: staff)
+
+    assert withdrawn.registration_status == :withdrawn_before_start
+
+    checked_player = create_player!()
+
+    assert {:ok, checked_entry} =
+             Competition.add_round_entry(event.id, round.id, checked_player.id, actor: admin)
+
+    assert {:ok, checked_entry} =
+             Competition.check_in_round_entry(checked_entry, actor: staff)
+
+    assert {:ok, no_show} = Competition.mark_no_show(checked_entry, actor: staff)
+    assert no_show.registration_status == :no_show
+    assert no_show.participation_status == :not_started
+  end
+
+  test "terminal registration entries cannot be revived by ordinary registration actions" do
+    %{event: event, round: round, admin: admin} = setup_round!()
+    staff = create_staff_user!()
+    assign_role!(admin, event, staff, :registration_staff)
+    manager = create_staff_user!()
+    assign_role!(admin, event, manager, :competition_manager)
+
+    add_entry = fn ->
+      player = create_player!()
+
+      assert {:ok, entry} =
+               Competition.add_round_entry(event.id, round.id, player.id, actor: admin)
+
+      entry
+    end
+
+    assert {:ok, no_show} = add_entry.() |> then(&Competition.mark_no_show(&1, actor: staff))
+
+    assert {:ok, withdrawn} =
+             add_entry.() |> then(&Competition.withdraw_before_start(&1, actor: staff))
+
+    original = add_entry.()
+
+    assert {:ok, %{original: replaced}} =
+             ReplaceRoundEntry.run(
+               manager,
+               event.id,
+               round.id,
+               original.id,
+               create_player!().id
+             )
+
+    for terminal <- [no_show, withdrawn, replaced] do
+      assert terminal.registration_status in [
+               :no_show,
+               :withdrawn_before_start,
+               :replaced_before_start
+             ]
+
+      assert {:error, _error} = Competition.check_in_round_entry(terminal, actor: staff)
+      assert {:error, _error} = Competition.mark_no_show(terminal, actor: staff)
+      assert {:error, _error} = Competition.withdraw_before_start(terminal, actor: staff)
+    end
+  end
+
   test "PostgreSQL integrity constraints and RESTRICT history" do
     %{event: event, round: round, admin: admin, player: player} = setup_round!()
     other_event = create_event!()
@@ -156,6 +245,23 @@ defmodule GolfScoring.Competition.RoundEntryTest do
 
     assert_raise Postgrex.Error, fn ->
       Repo.query!("DELETE FROM players WHERE id = $1::uuid", [Ecto.UUID.dump!(player.id)])
+    end
+
+    assert %Postgrex.Result{rows: [["r"]]} =
+             Repo.query!("""
+             SELECT c.confdeltype::text
+             FROM pg_constraint c
+             JOIN unnest(c.conkey) AS key(attnum) ON true
+             JOIN pg_attribute a
+               ON a.attrelid = c.conrelid
+              AND a.attnum = key.attnum
+             WHERE c.conrelid = 'round_entries'::regclass
+               AND c.contype = 'f'
+               AND c.conname = 'round_entries_event_id_fkey'
+             """)
+
+    assert_raise Postgrex.Error, fn ->
+      Repo.query!("DELETE FROM events WHERE id = $1::uuid", [Ecto.UUID.dump!(event.id)])
     end
 
     refute is_nil(entry.id)

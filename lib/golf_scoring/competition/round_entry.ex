@@ -11,6 +11,7 @@ defmodule GolfScoring.Competition.RoundEntry do
     repo GolfScoring.Repo
 
     references do
+      reference :event, on_delete: :restrict
       reference :round, on_delete: :restrict, match_with: [event_id: :event_id]
       reference :player, on_delete: :restrict
       reference :checked_in_by_staff_user, on_delete: :restrict
@@ -75,6 +76,22 @@ defmodule GolfScoring.Competition.RoundEntry do
       atomic_upgrade? false
 
       change {GolfScoring.Competition.RoundEntryLifecycleGuard, operation: :withdraw_before_start}
+    end
+
+    update :mark_replaced_before_start_internal do
+      public? false
+      accept []
+      transaction? false
+      require_atomic? false
+      atomic_upgrade? false
+      change GolfScoring.Competition.Changes.MarkReplacedBeforeStartInternal
+    end
+
+    create :create_replacement_entry_internal do
+      public? false
+      accept [:event_id, :round_id, :player_id]
+      transaction? false
+      change GolfScoring.Competition.Changes.CreateReplacementEntryInternal
     end
   end
 

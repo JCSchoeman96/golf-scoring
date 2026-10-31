@@ -143,31 +143,24 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
   end
 
   defp mark_original_replaced(original_id) do
-    case Repo.query!(
-           """
-           UPDATE round_entries
-           SET registration_status = 'replaced_before_start', updated_at = (NOW() AT TIME ZONE 'UTC')
-           WHERE id = $1::uuid
-             AND registration_status IN ('expected', 'checked_in')
-             AND participation_status = 'not_started'
-           RETURNING id::text
-           """,
-           [Ecto.UUID.dump!(original_id)]
-         ).rows do
-      [[_id]] -> {:ok, Ash.get!(RoundEntry, original_id, authorize?: false)}
-      [] -> {:error, :mark_original_failed}
+    RoundEntry
+    |> Ash.get!(original_id, authorize?: false)
+    |> Changeset.for_update(:mark_replaced_before_start_internal, %{})
+    |> Ash.update(authorize?: false)
+    |> case do
+      {:ok, entry} -> {:ok, entry}
+      {:error, _error} -> {:error, :mark_original_failed}
     end
   end
 
-  defp create_replacement(actor, original, replacement_player_id) do
+  defp create_replacement(_actor, original, replacement_player_id) do
     RoundEntry
-    |> Changeset.for_create(:add_round_entry, %{
+    |> Changeset.for_create(:create_replacement_entry_internal, %{
       event_id: original.event_id,
       round_id: original.round_id,
       player_id: replacement_player_id
     })
-    |> Changeset.put_context(:gls16_skip_entry_authorization, true)
-    |> Ash.create(actor: actor, authorize?: false)
+    |> Ash.create(authorize?: false)
     |> case do
       {:ok, entry} -> {:ok, entry}
       {:error, error} -> {:error, error}

@@ -21,7 +21,7 @@ defmodule GolfScoring.Competition.Changes.CreateRoundEntry do
       player_id = Ash.Changeset.get_attribute(changeset, :player_id)
 
       with {:ok, _scope} <- EventAuthorityLock.lock_scope!(event_id, [actor_id]),
-           :ok <- maybe_authorize(changeset, actor_id, event_id),
+           :ok <- authorize(actor_id, event_id),
            {:ok, round} <- lock_round(round_id),
            :ok <- round_belongs_to_event(round, event_id),
            :ok <- round_accepts_new_entry(round),
@@ -34,14 +34,6 @@ defmodule GolfScoring.Competition.Changes.CreateRoundEntry do
           Ash.Changeset.add_error(changeset, field: :round_id, message: message)
       end
     end)
-  end
-
-  defp maybe_authorize(changeset, actor_id, event_id) do
-    if Map.get(changeset.context, :gls16_skip_entry_authorization) do
-      :ok
-    else
-      authorize(actor_id, event_id)
-    end
   end
 
   defp authorize(actor_id, event_id) do
