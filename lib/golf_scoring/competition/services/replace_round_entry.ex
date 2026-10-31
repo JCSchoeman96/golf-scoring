@@ -23,13 +23,16 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
            {:ok, round} <- lock_round(round_id),
            :ok <- round_belongs_to_event(round, event_id),
            :ok <- round_accepts_replacement(round),
+           {:ok, playing_group_id} <- fetch_playing_group_id(original_entry_id, round_id),
+           :ok <- lock_playing_group_if_present(playing_group_id),
            {:ok, original} <- lock_round_entry(original_entry_id),
            :ok <- original_belongs_to_round(original, round_id, event_id),
+           :ok <- verify_group_unchanged(original, playing_group_id),
            :ok <- validate_original(original, replacement_player_id),
            :ok <- replacement_player_exists(replacement_player_id),
            :ok <- replacement_available(round_id, replacement_player_id),
            {:ok, marked} <- mark_original_replaced(original.id),
-           {:ok, replacement} <- create_replacement(actor, marked, replacement_player_id) do
+           {:ok, replacement} <- create_replacement(marked, replacement_player_id) do
         %{original: marked, replacement: replacement}
       else
         {:error, reason} -> Repo.rollback(reason)
@@ -74,18 +77,45 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
   defp round_accepts_replacement(%{state: state}) when state in @pre_open_round_states, do: :ok
   defp round_accepts_replacement(%{state: state}), do: {:error, {:invalid_round_state, state}}
 
+  defp fetch_playing_group_id(original_entry_id, round_id) do
+    case Repo.query!(
+           """
+           SELECT playing_group_id::text
+           FROM round_entries
+           WHERE id = $1::uuid AND round_id = $2::uuid
+           """,
+           [Ecto.UUID.dump!(original_entry_id), Ecto.UUID.dump!(round_id)]
+         ).rows do
+      [[nil]] -> {:ok, nil}
+      [[group_id]] -> {:ok, Ecto.UUID.cast!(group_id)}
+      [] -> {:error, :round_entry_not_found}
+    end
+  end
+
+  defp lock_playing_group_if_present(nil), do: :ok
+
+  defp lock_playing_group_if_present(playing_group_id) do
+    case Repo.query!(
+           "SELECT id::text FROM playing_groups WHERE id = $1::uuid FOR UPDATE",
+           [Ecto.UUID.dump!(playing_group_id)]
+         ).rows do
+      [[_id]] -> :ok
+      [] -> {:error, :playing_group_not_found}
+    end
+  end
+
   defp lock_round_entry(round_entry_id) do
     case Repo.query!(
            """
            SELECT id::text, event_id::text, round_id::text, player_id::text,
-                  registration_status, participation_status
+                  registration_status, participation_status, playing_group_id::text
            FROM round_entries
            WHERE id = $1::uuid
            FOR UPDATE
            """,
            [Ecto.UUID.dump!(round_entry_id)]
          ).rows do
-      [[id, event_id, round_id, player_id, registration_status, participation_status]] ->
+      [[id, event_id, round_id, player_id, registration_status, participation_status, group_id]] ->
         {:ok,
          %{
            id: Ecto.UUID.cast!(id),
@@ -93,13 +123,27 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
            round_id: Ecto.UUID.cast!(round_id),
            player_id: Ecto.UUID.cast!(player_id),
            registration_status: registration_atom(registration_status),
-           participation_status: participation_atom(participation_status)
+           participation_status: participation_atom(participation_status),
+           playing_group_id: cast_optional_uuid(group_id)
          }}
 
       [] ->
         {:error, :round_entry_not_found}
     end
   end
+
+  defp cast_optional_uuid(nil), do: nil
+
+  defp cast_optional_uuid(value) do
+    {:ok, uuid} = Ecto.UUID.cast(value)
+    uuid
+  end
+
+  defp verify_group_unchanged(%{playing_group_id: current}, expected) when current == expected,
+    do: :ok
+
+  defp verify_group_unchanged(_original, _expected),
+    do: {:error, :playing_group_changed_under_lock}
 
   defp original_belongs_to_round(original, round_id, event_id) do
     if original.round_id == round_id and original.event_id == event_id do
@@ -153,12 +197,13 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
     end
   end
 
-  defp create_replacement(_actor, original, replacement_player_id) do
+  defp create_replacement(original, replacement_player_id) do
     RoundEntry
     |> Changeset.for_create(:create_replacement_entry_internal, %{
       event_id: original.event_id,
       round_id: original.round_id,
-      player_id: replacement_player_id
+      player_id: replacement_player_id,
+      playing_group_id: original.playing_group_id
     })
     |> Ash.create(authorize?: false)
     |> case do
