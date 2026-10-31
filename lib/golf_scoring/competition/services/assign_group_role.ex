@@ -167,7 +167,6 @@ defmodule GolfScoring.Competition.Services.AssignGroupRole do
          ) do
       {:error, :no_active_assignment} -> :ok
       {:ok, _} -> {:error, :active_role_already_assigned}
-      {:error, reason} -> {:error, reason}
     end
   end
 

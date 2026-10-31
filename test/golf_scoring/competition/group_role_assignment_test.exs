@@ -9,6 +9,7 @@ defmodule GolfScoring.Competition.GroupRoleAssignmentTest do
   alias GolfScoring.Accounts
   alias GolfScoring.Audit.AuditEvent
   alias GolfScoring.Competition
+  alias GolfScoring.Competition.CompetitionSideMembership
   alias GolfScoring.Competition.Event
   alias GolfScoring.Competition.GroupRoleAssignment
   alias GolfScoring.Competition.Round
@@ -16,7 +17,6 @@ defmodule GolfScoring.Competition.GroupRoleAssignmentTest do
   alias GolfScoring.Competition.Services.AssignGroupRole
   alias GolfScoring.Competition.Services.HandoverGroupRole
   alias GolfScoring.Competition.Services.SetSideMembership
-  alias GolfScoring.Competition.CompetitionSideMembership
   alias GolfScoring.Repo
 
   @password "GLS-20 synthetic staff passphrase 2026"

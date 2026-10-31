@@ -9,10 +9,10 @@ defmodule GolfScoring.Competition.RoundEntryTest do
   alias GolfScoring.Accounts.EventStaffAssignment
   alias GolfScoring.Competition
   alias GolfScoring.Competition.Event
+  alias GolfScoring.Competition.GroupRoleAssignment
   alias GolfScoring.Competition.Player
   alias GolfScoring.Competition.Round
   alias GolfScoring.Competition.RoundEntry
-  alias GolfScoring.Competition.GroupRoleAssignment
   alias GolfScoring.Competition.Services.AssignEntryToGroup
   alias GolfScoring.Competition.Services.ReplaceRoundEntry
   alias GolfScoring.Competition.StartingParticipant
