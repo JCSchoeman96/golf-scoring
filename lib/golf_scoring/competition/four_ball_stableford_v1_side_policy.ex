@@ -14,6 +14,35 @@ defmodule GolfScoring.Competition.FourBallStablefordV1SidePolicy do
 
   def validate_membership(_competition, _formation, _entries), do: {:error, :invalid_formation}
 
+  @spec validate_side_composition(map(), atom(), [map()]) :: :ok | {:error, atom()}
+  def validate_side_composition(%{solo_sides_permitted: solo?}, formation, entries)
+      when formation in [:partnership, :solo] and is_list(entries) do
+    starter_count = Enum.count(entries, &StartingParticipant.current_starting_participant?/1)
+
+    case formation do
+      :partnership when starter_count in [0, 2] ->
+        :ok
+
+      :partnership ->
+        {:error, :invalid_side_cardinality}
+
+      :solo when starter_count == 0 ->
+        :ok
+
+      :solo when starter_count == 1 and solo? ->
+        :ok
+
+      :solo when starter_count == 1 ->
+        {:error, :solo_not_permitted}
+
+      :solo ->
+        {:error, :invalid_side_cardinality}
+    end
+  end
+
+  def validate_side_composition(_competition, _formation, _entries),
+    do: {:error, :invalid_formation}
+
   defp validate_unique_member_ids(entries) do
     member_ids = Enum.map(entries, & &1.id)
 

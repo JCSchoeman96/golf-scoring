@@ -18,6 +18,7 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
   alias GolfScoring.Competition.Services.CreateCompetitionSide
   alias GolfScoring.Competition.Services.ReplaceRoundEntry
   alias GolfScoring.Competition.Services.SetSideMembership
+  alias GolfScoring.Competition.FourBallStablefordV1SidePolicy
   alias GolfScoring.Competition.StartingParticipant
   alias GolfScoring.Repo
 
@@ -170,7 +171,7 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
              )
   end
 
-  test "moving an entry to another side replaces prior membership in the same RoundCompetition" do
+  test "moving an entry to another side rejects leaving the source partnership with one current starter" do
     setup = setup_round_with_competition!(solo_permitted: true)
     side_a = create_side!(setup, :partnership)
     side_b = create_side!(setup, :partnership)
@@ -184,6 +185,26 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
                setup.competition.id,
                side_a.id,
                [e1.id, e2.id]
+             )
+
+    assert {:error, :invalid_side_cardinality} =
+             SetSideMembership.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.competition.id,
+               side_b.id,
+               [e1.id, e3.id]
+             )
+
+    assert {:ok, _} =
+             SetSideMembership.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.competition.id,
+               side_a.id,
+               [e2.id, add_entry!(setup).id]
              )
 
     assert {:ok, _} =
@@ -203,6 +224,76 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
       ).rows
 
     assert e1_rows == [[side_b.id]]
+  end
+
+  test "PostgreSQL rejects cross-round competition side membership" do
+    setup = setup_round_with_competition!(solo_permitted: true)
+    side = create_side!(setup, :partnership)
+    entry = add_entry!(setup)
+
+    other_course = create_course!(setup.event, setup.admin)
+
+    {:ok, other_round} =
+      Competition.create_round(setup.event.id, other_course.id, actor: setup.admin)
+
+    other_entry = add_entry!(%{setup | round: other_round})
+
+    cross_round =
+      assert_raise Postgrex.Error, fn ->
+        Repo.query!(
+          """
+          INSERT INTO competition_side_memberships
+            (id, round_competition_id, competition_side_id, round_entry_id, round_id, inserted_at, updated_at)
+          VALUES
+            (gen_random_uuid(), $1::uuid, $2::uuid, $3::uuid, $4::uuid, now(), now())
+          """,
+          [
+            Ecto.UUID.dump!(setup.competition.id),
+            Ecto.UUID.dump!(side.id),
+            Ecto.UUID.dump!(other_entry.id),
+            Ecto.UUID.dump!(setup.round.id)
+          ]
+        )
+      end
+
+    assert cross_round.postgres.code in [:foreign_key_violation, :check_violation]
+
+    same_round_mismatch =
+      assert_raise Postgrex.Error, fn ->
+        Repo.query!(
+          """
+          INSERT INTO competition_side_memberships
+            (id, round_competition_id, competition_side_id, round_entry_id, round_id, inserted_at, updated_at)
+          VALUES
+            (gen_random_uuid(), $1::uuid, $2::uuid, $3::uuid, $4::uuid, now(), now())
+          """,
+          [
+            Ecto.UUID.dump!(setup.competition.id),
+            Ecto.UUID.dump!(side.id),
+            Ecto.UUID.dump!(entry.id),
+            Ecto.UUID.dump!(other_round.id)
+          ]
+        )
+      end
+
+    assert same_round_mismatch.postgres.code in [:foreign_key_violation, :check_violation]
+  end
+
+  test "future CompetitionSideResult transitions fail closed" do
+    setup = setup_round_with_competition!(solo_permitted: true)
+    side = create_side!(setup, :partnership)
+
+    [result] =
+      CompetitionSideResult
+      |> Ash.Query.filter(competition_side_id == ^side.id)
+      |> Ash.read!(authorize?: false)
+
+    assert result.state == :provisional
+
+    assert {:error, %Ash.Error.Invalid{}} =
+             result
+             |> Changeset.for_update(:mark_ready_to_finalize)
+             |> Ash.update(authorize?: false)
   end
 
   test "side creation creates exactly one provisional CompetitionSideResult" do
@@ -373,6 +464,10 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
 
       assert count == 1
       refute Enum.all?(results, &match?({:error, :membership_create_failed}, &1))
+
+      Sandbox.unboxed_run(Repo, fn ->
+        assert :ok = assert_all_sides_valid_composition!(fixture.competition_id, fixture.round_id)
+      end)
     after
       cleanup_committed_side_race_fixture!(fixture)
     end
@@ -503,6 +598,48 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
 
   defp pg_backend_pid! do
     Repo.query!("SELECT pg_backend_pid()").rows |> hd() |> hd()
+  end
+
+  defp assert_all_sides_valid_composition!(competition_id, round_id) do
+    competition = Ash.get!(RoundCompetition, competition_id, authorize?: false)
+
+    sides =
+      CompetitionSide
+      |> Ash.Query.filter(round_competition_id == ^competition_id)
+      |> Ash.read!(authorize?: false)
+
+    Enum.reduce(sides, :ok, fn side, :ok ->
+      rows =
+        Repo.query!(
+          """
+          SELECT re.id::text, re.event_id::text, re.round_id::text,
+                 re.registration_status, re.participation_status
+          FROM competition_side_memberships csm
+          JOIN round_entries re ON re.id = csm.round_entry_id
+          WHERE csm.competition_side_id = $1::uuid
+            AND csm.round_id = $2::uuid
+          ORDER BY re.id
+          """,
+          [Ecto.UUID.dump!(side.id), Ecto.UUID.dump!(round_id)]
+        ).rows
+
+      entries =
+        Enum.map(rows, fn [id, eid, rid, reg, part] ->
+          %{
+            id: Ecto.UUID.cast!(id),
+            event_id: Ecto.UUID.cast!(eid),
+            round_id: Ecto.UUID.cast!(rid),
+            registration_status: String.to_existing_atom(reg),
+            participation_status: String.to_existing_atom(part)
+          }
+        end)
+
+      FourBallStablefordV1SidePolicy.validate_side_composition(
+        competition,
+        side.formation,
+        entries
+      )
+    end)
   end
 
   defp create_event! do

@@ -54,7 +54,61 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLiveTest do
 
     render_click(element(view, "#configure-round-competition-button"))
     assert has_element?(view, "#create-competition-side-partnership")
+    refute has_element?(view, "#create-competition-side-solo")
+    assert has_element?(view, "#enable-solo-sides-button")
     assert has_element?(view, "#round-competition-summary")
+
+    render_click(element(view, "#enable-solo-sides-button"))
+    assert has_element?(view, "#create-competition-side-solo")
+  end
+
+  test "replacement side UI shows only current starters on a partnership side", %{conn: conn} do
+    setup = seed_group_setup!()
+    conn = authenticate(conn, setup.admin.email)
+
+    {:ok, view, _html} =
+      live(conn, ~p"/admin/events/#{setup.event.id}/rounds/#{setup.round.id}/groups")
+
+    render_click(element(view, "#configure-round-competition-button"))
+    render_click(element(view, "#create-competition-side-partnership"))
+
+    html = render(view)
+
+    [side_id | _] =
+      Regex.scan(~r/id="competition-side-([0-9a-f-]+)"/, html) |> Enum.map(fn [_, id] -> id end)
+
+    [e1, e2] = for _ <- 1..2, do: add_entry!(setup)
+
+    render_submit(element(view, "#set-side-membership-form-#{side_id}"), %{
+      "side" => %{"side_id" => side_id, "entry_ids" => "#{e1.id},#{e2.id}"}
+    })
+
+    assert render(view) =~ e1.id
+    assert render(view) =~ e2.id
+
+    replacement_player =
+      GolfScoring.Competition.Player
+      |> Changeset.for_create(:create_internal, %{
+        first_name: "Rep",
+        surname: "Lace#{System.unique_integer([:positive])}"
+      })
+      |> Ash.create!(authorize?: false)
+
+    assert {:ok, _} =
+             GolfScoring.Competition.Services.ReplaceRoundEntry.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               e1.id,
+               replacement_player.id
+             )
+
+    {:ok, view, _html} =
+      live(conn, ~p"/admin/events/#{setup.event.id}/rounds/#{setup.round.id}/groups")
+
+    side_html = render(view)
+    refute side_html =~ "Entry #{e1.id}"
+    assert side_html =~ e2.id
   end
 
   test "registration staff is denied", %{conn: conn} do

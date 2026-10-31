@@ -27,13 +27,22 @@ defmodule GolfScoring.Competition.Services.SetSideMembership do
            :ok <- round_belongs_to_event(round, event_id),
            :ok <- round_accepts_membership(round),
            {:ok, competition} <- lock_round_competition(round_competition_id, round_id),
+           {:ok, affected_side_ids} <-
+             {:ok,
+              collect_affected_side_ids(
+                round_competition_id,
+                competition_side_id,
+                round_entry_ids
+              )},
+           :ok <- lock_competition_sides(affected_side_ids, round_competition_id, round_id),
            {:ok, side} <-
-             lock_competition_side(competition_side_id, round_competition_id, round_id),
+             fetch_competition_side(competition_side_id, round_competition_id, round_id),
            {:ok, entries} <- lock_round_entries(round_entry_ids, round_id, event_id),
            :ok <- validate_scope(entries, round_id),
            :ok <- validate_policy(competition, side, entries),
            :ok <- remove_existing_memberships(round_competition_id, round_entry_ids),
            :ok <- replace_side_memberships(round, competition, side, round_entry_ids),
+           :ok <- validate_affected_sides(competition, affected_side_ids, round_id),
            :ok <- write_audit_if_ready(actor_id, round),
            {:ok, memberships} <- load_side_memberships(competition_side_id) do
         %{memberships: memberships}
@@ -112,7 +121,7 @@ defmodule GolfScoring.Competition.Services.SetSideMembership do
     end
   end
 
-  defp lock_competition_side(competition_side_id, round_competition_id, round_id) do
+  defp fetch_competition_side(competition_side_id, round_competition_id, round_id) do
     case Repo.query!(
            """
            SELECT id::text, formation
@@ -120,7 +129,6 @@ defmodule GolfScoring.Competition.Services.SetSideMembership do
            WHERE id = $1::uuid
              AND round_competition_id = $2::uuid
              AND round_id = $3::uuid
-           FOR UPDATE
            """,
            [
              Ecto.UUID.dump!(competition_side_id),
@@ -134,6 +142,92 @@ defmodule GolfScoring.Competition.Services.SetSideMembership do
       [] ->
         {:error, :competition_side_not_found}
     end
+  end
+
+  defp collect_affected_side_ids(round_competition_id, target_side_id, round_entry_ids) do
+    source_side_ids =
+      if round_entry_ids == [] do
+        []
+      else
+        CompetitionSideMembership
+        |> Ash.Query.filter(
+          round_competition_id == ^round_competition_id and
+            round_entry_id in ^round_entry_ids
+        )
+        |> Ash.read!(authorize?: false)
+        |> Enum.map(& &1.competition_side_id)
+      end
+
+    [target_side_id | source_side_ids]
+    |> Enum.uniq()
+    |> Enum.sort_by(&Ecto.UUID.dump!/1)
+  end
+
+  defp lock_competition_sides(side_ids, round_competition_id, round_id) do
+    Enum.reduce_while(side_ids, :ok, fn side_id, :ok ->
+      case Repo.query!(
+             """
+             SELECT id::text
+             FROM competition_sides
+             WHERE id = $1::uuid
+               AND round_competition_id = $2::uuid
+               AND round_id = $3::uuid
+             FOR UPDATE
+             """,
+             [
+               Ecto.UUID.dump!(side_id),
+               Ecto.UUID.dump!(round_competition_id),
+               Ecto.UUID.dump!(round_id)
+             ]
+           ).rows do
+        [[_id]] -> {:cont, :ok}
+        [] -> {:halt, {:error, :competition_side_not_found}}
+      end
+    end)
+  end
+
+  defp validate_affected_sides(competition, side_ids, round_id) do
+    Enum.reduce_while(side_ids, :ok, fn side_id, :ok ->
+      case validate_one_side_composition(competition, side_id, round_id) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_one_side_composition(competition, side_id, round_id) do
+    with {:ok, side} <- fetch_competition_side(side_id, competition.id, round_id),
+         {:ok, entries} <- load_side_member_entries(side_id, round_id) do
+      case competition.scoring_policy_identifier do
+        "four_ball_stableford_v1" ->
+          FourBallStablefordV1SidePolicy.validate_side_composition(
+            competition,
+            side.formation,
+            entries
+          )
+
+        _ ->
+          {:error, :unsupported_scoring_policy}
+      end
+    end
+  end
+
+  defp load_side_member_entries(side_id, round_id) do
+    rows =
+      Repo.query!(
+        """
+        SELECT re.id::text, re.event_id::text, re.round_id::text,
+               re.registration_status, re.participation_status
+        FROM competition_side_memberships csm
+        JOIN round_entries re ON re.id = csm.round_entry_id
+        WHERE csm.competition_side_id = $1::uuid
+          AND csm.round_id = $2::uuid
+        ORDER BY re.id
+        """,
+        [Ecto.UUID.dump!(side_id), Ecto.UUID.dump!(round_id)]
+      ).rows
+
+    {:ok, map_locked_round_entries(rows)}
   end
 
   defp lock_round_entries(round_entry_ids, round_id, event_id) do

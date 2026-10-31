@@ -21,6 +21,7 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
   alias GolfScoring.Competition.Services.ConfigureRoundCompetition
   alias GolfScoring.Competition.Services.CreateCompetitionSide
   alias GolfScoring.Competition.Services.SetSideMembership
+  alias GolfScoring.Competition.RoundEntry
   alias GolfScoring.Competition.StartingParticipant
   alias GolfScoring.Competition.StartingPositionLabel
   alias GolfScoring.Repo
@@ -63,7 +64,7 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
     round = socket.assigns.round
     event_id = socket.assigns.event_id
 
-    case ConfigureRoundCompetition.run(staff, event_id, round.id, %{solo_sides_permitted: true}) do
+    case ConfigureRoundCompetition.run(staff, event_id, round.id, %{}) do
       {:ok, _} ->
         {:noreply,
          socket
@@ -76,6 +77,26 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
 
       {:error, _} ->
         {:noreply, put_flash(socket, :error, "Could not configure RoundCompetition.")}
+    end
+  end
+
+  def handle_event("enable_solo_sides", _params, socket) do
+    staff = Repo.get!(StaffUser, socket.assigns.current_staff_user.id)
+    round = socket.assigns.round
+    event_id = socket.assigns.event_id
+
+    case ConfigureRoundCompetition.run(staff, event_id, round.id, %{solo_sides_permitted: true}) do
+      {:ok, _} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Intentional solo sides are enabled for this competition.")
+         |> refresh_assignments(round)}
+
+      {:error, :forbidden} ->
+        {:noreply, put_flash(socket, :error, "You are not allowed to change competition setup.")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not update competition solo policy.")}
     end
   end
 
@@ -330,6 +351,17 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
               Policy: {@round_competition.scoring_policy_identifier} · Solo sides permitted: {@round_competition.solo_sides_permitted}
             </p>
 
+            <%= if @can_mutate and not @round_competition.solo_sides_permitted do %>
+              <button
+                id="enable-solo-sides-button"
+                type="button"
+                phx-click="enable_solo_sides"
+                class="btn btn-outline btn-sm"
+              >
+                Enable intentional solo sides
+              </button>
+            <% end %>
+
             <%= if @can_mutate do %>
               <div class="flex flex-wrap gap-2">
                 <button
@@ -341,15 +373,17 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
                 >
                   Add partnership side
                 </button>
-                <button
-                  id="create-competition-side-solo"
-                  type="button"
-                  phx-click="create_competition_side"
-                  phx-value-formation="solo"
-                  class="btn btn-sm btn-outline"
-                >
-                  Add intentional solo side
-                </button>
+                <%= if @round_competition.solo_sides_permitted do %>
+                  <button
+                    id="create-competition-side-solo"
+                    type="button"
+                    phx-click="create_competition_side"
+                    phx-value-formation="solo"
+                    class="btn btn-sm btn-outline"
+                  >
+                    Add intentional solo side
+                  </button>
+                <% end %>
               </div>
             <% end %>
 
@@ -624,12 +658,28 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
       |> Ash.read!(authorize?: false)
       |> Enum.group_by(& &1.competition_side_id, & &1.round_entry_id)
 
+    entries_by_id =
+      RoundEntry
+      |> Ash.Query.filter(round_id == ^round_id)
+      |> Ash.read!(authorize?: false)
+      |> Map.new(&{&1.id, &1})
+
     Enum.map(sides, fn side ->
+      all_member_ids = Map.get(memberships, side.id, [])
+
+      current_member_ids =
+        Enum.filter(all_member_ids, fn entry_id ->
+          case Map.get(entries_by_id, entry_id) do
+            nil -> false
+            entry -> StartingParticipant.current_starting_participant?(entry)
+          end
+        end)
+
       %{
         id: side.id,
         formation: side.formation,
         result_state: Map.get(results_by_side, side.id, :unknown),
-        member_ids: Map.get(memberships, side.id, [])
+        member_ids: current_member_ids
       }
     end)
   end
