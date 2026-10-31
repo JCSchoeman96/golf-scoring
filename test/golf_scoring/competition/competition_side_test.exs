@@ -171,6 +171,160 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
              )
   end
 
+  test "set_side_membership rejects partnership when members are already in different playing groups" do
+    setup = setup_round_with_competition!(solo_permitted: true)
+    side = create_side!(setup, :partnership)
+    [e1, e2, keeper_a, keeper_b] = for _ <- 1..4, do: add_entry!(setup)
+
+    assert {:ok, _} =
+             SetSideMembership.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.competition.id,
+               side.id,
+               [keeper_a.id, keeper_b.id]
+             )
+
+    {:ok, group_a} =
+      Competition.create_playing_group(setup.event.id, setup.round.id, actor: setup.admin)
+
+    {:ok, group_b} =
+      Competition.create_playing_group(setup.event.id, setup.round.id, actor: setup.admin)
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               e1.id,
+               group_a.id
+             )
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               e2.id,
+               group_b.id
+             )
+
+    assert {:error, :competition_side_split_across_groups} =
+             SetSideMembership.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.competition.id,
+               side.id,
+               [e1.id, e2.id]
+             )
+
+    assert side_member_entry_ids(side.id) == [keeper_a.id, keeper_b.id]
+  end
+
+  test "set_side_membership allows partnership when one member is still unassigned to a playing group" do
+    setup = setup_round_with_competition!(solo_permitted: true)
+    side = create_side!(setup, :partnership)
+    [e1, e2] = for _ <- 1..2, do: add_entry!(setup)
+
+    {:ok, group_a} =
+      Competition.create_playing_group(setup.event.id, setup.round.id, actor: setup.admin)
+
+    {:ok, group_b} =
+      Competition.create_playing_group(setup.event.id, setup.round.id, actor: setup.admin)
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               e1.id,
+               group_a.id
+             )
+
+    assert {:ok, _} =
+             SetSideMembership.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.competition.id,
+               side.id,
+               [e1.id, e2.id]
+             )
+
+    assert {:error, :competition_side_split_across_groups} =
+             AssignEntryToGroup.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               e2.id,
+               group_b.id
+             )
+  end
+
+  test "set_side_membership allows partnership when both members share a playing group" do
+    setup = setup_round_with_competition!(solo_permitted: true)
+    side = create_side!(setup, :partnership)
+    [e1, e2] = for _ <- 1..2, do: add_entry!(setup)
+
+    {:ok, group_a} =
+      Competition.create_playing_group(setup.event.id, setup.round.id, actor: setup.admin)
+
+    for entry <- [e1, e2] do
+      assert {:ok, _} =
+               AssignEntryToGroup.run(
+                 setup.admin,
+                 setup.event.id,
+                 setup.round.id,
+                 entry.id,
+                 group_a.id
+               )
+    end
+
+    assert {:ok, _} =
+             SetSideMembership.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.competition.id,
+               side.id,
+               [e1.id, e2.id]
+             )
+
+    assert side_member_entry_ids(side.id) == Enum.sort([e1.id, e2.id])
+  end
+
+  test "set_side_membership allows solo side member already assigned to a playing group" do
+    setup = setup_round_with_competition!(solo_permitted: true)
+    side = create_side!(setup, :solo)
+    e1 = add_entry!(setup)
+
+    {:ok, group_a} =
+      Competition.create_playing_group(setup.event.id, setup.round.id, actor: setup.admin)
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               e1.id,
+               group_a.id
+             )
+
+    assert {:ok, _} =
+             SetSideMembership.run(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.competition.id,
+               side.id,
+               [e1.id]
+             )
+
+    assert side_member_entry_ids(side.id) == [e1.id]
+  end
+
   test "moving an entry to another side rejects leaving the source partnership with one current starter" do
     setup = setup_round_with_competition!(solo_permitted: true)
     side_a = create_side!(setup, :partnership)
@@ -691,5 +845,18 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
       surname: "Golfer#{System.unique_integer([:positive])}"
     })
     |> Ash.create!(authorize?: false)
+  end
+
+  defp side_member_entry_ids(side_id) do
+    Repo.query!(
+      """
+      SELECT round_entry_id::text
+      FROM competition_side_memberships
+      WHERE competition_side_id = $1::uuid
+      ORDER BY round_entry_id
+      """,
+      [Ecto.UUID.dump!(side_id)]
+    ).rows
+    |> Enum.map(fn [id] -> Ecto.UUID.cast!(id) end)
   end
 end

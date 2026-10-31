@@ -6,6 +6,7 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
   alias Ash.Changeset
   alias GolfScoring.Accounts.Checks.ActiveEventRole
   alias GolfScoring.Accounts.EventAuthorityLock
+  alias GolfScoring.Competition.CompetitionSideGroupCohesion
   alias GolfScoring.Competition.CompetitionSideMembership
   alias GolfScoring.Competition.PlayingGroupReadiness
   alias GolfScoring.Competition.RoundEntry
@@ -250,25 +251,10 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
       |> load_side_member_entries(round_id)
       |> Enum.filter(&StartingParticipant.current_starting_participant?/1)
 
-    if partnership_split_across_groups?(starters, moving_entry_id, target_group_id) do
-      {:error, :competition_side_split_across_groups}
-    else
-      :ok
-    end
-  end
-
-  defp partnership_split_across_groups?(starters, _moving_entry_id, _target_group_id)
-       when length(starters) < 2,
-       do: false
-
-  defp partnership_split_across_groups?(starters, moving_entry_id, target_group_id) do
-    starters
-    |> Enum.map(fn member ->
-      if member.id == moving_entry_id, do: target_group_id, else: member.playing_group_id
-    end)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq()
-    |> then(&(length(&1) > 1))
+    CompetitionSideGroupCohesion.validate(starters,
+      moving_entry_id: moving_entry_id,
+      target_group_id: target_group_id
+    )
   end
 
   defp load_side_member_entries(side_id, round_id) do

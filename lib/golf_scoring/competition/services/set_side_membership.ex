@@ -7,6 +7,7 @@ defmodule GolfScoring.Competition.Services.SetSideMembership do
   alias GolfScoring.Accounts.Checks.ActiveEventRole
   alias GolfScoring.Accounts.EventAuthorityLock
   alias GolfScoring.Audit
+  alias GolfScoring.Competition.CompetitionSideGroupCohesion
   alias GolfScoring.Competition.CompetitionSideMembership
   alias GolfScoring.Competition.FourBallStablefordV1SidePolicy
   alias GolfScoring.Repo
@@ -40,6 +41,7 @@ defmodule GolfScoring.Competition.Services.SetSideMembership do
            {:ok, entries} <- lock_round_entries(round_entry_ids, round_id, event_id),
            :ok <- validate_scope(entries, round_id),
            :ok <- validate_policy(competition, side, entries),
+           :ok <- validate_group_cohesion(entries),
            :ok <- remove_existing_memberships(round_competition_id, round_entry_ids),
            :ok <- replace_side_memberships(round, competition, side, round_entry_ids),
            :ok <- validate_affected_sides(competition, affected_side_ids, round_id),
@@ -198,17 +200,24 @@ defmodule GolfScoring.Competition.Services.SetSideMembership do
   defp validate_one_side_composition(competition, side_id, round_id) do
     with {:ok, side} <- fetch_competition_side(side_id, competition.id, round_id),
          {:ok, entries} <- load_side_member_entries(side_id, round_id) do
-      case competition.scoring_policy_identifier do
-        "four_ball_stableford_v1" ->
-          FourBallStablefordV1SidePolicy.validate_side_composition(
-            competition,
-            side.formation,
-            entries
-          )
+      validate_side_members_composition(competition, side, entries)
+    end
+  end
 
-        _ ->
-          {:error, :unsupported_scoring_policy}
-      end
+  defp validate_side_members_composition(competition, side, entries) do
+    case competition.scoring_policy_identifier do
+      "four_ball_stableford_v1" ->
+        with :ok <-
+               FourBallStablefordV1SidePolicy.validate_side_composition(
+                 competition,
+                 side.formation,
+                 entries
+               ) do
+          CompetitionSideGroupCohesion.validate(entries)
+        end
+
+      _ ->
+        {:error, :unsupported_scoring_policy}
     end
   end
 
@@ -217,7 +226,7 @@ defmodule GolfScoring.Competition.Services.SetSideMembership do
       Repo.query!(
         """
         SELECT re.id::text, re.event_id::text, re.round_id::text,
-               re.registration_status, re.participation_status
+               re.registration_status, re.participation_status, re.playing_group_id::text
         FROM competition_side_memberships csm
         JOIN round_entries re ON re.id = csm.round_entry_id
         WHERE csm.competition_side_id = $1::uuid
@@ -247,7 +256,7 @@ defmodule GolfScoring.Competition.Services.SetSideMembership do
     Repo.query!(
       """
       SELECT id::text, event_id::text, round_id::text,
-             registration_status, participation_status
+             registration_status, participation_status, playing_group_id::text
       FROM round_entries
       WHERE round_id = $1::uuid
         AND id = ANY($2::uuid[])
@@ -277,16 +286,27 @@ defmodule GolfScoring.Competition.Services.SetSideMembership do
   end
 
   defp map_locked_round_entries(rows) do
-    Enum.map(rows, fn [id, eid, rid, reg, part] ->
-      %{
-        id: Ecto.UUID.cast!(id),
-        event_id: Ecto.UUID.cast!(eid),
-        round_id: Ecto.UUID.cast!(rid),
-        registration_status: String.to_existing_atom(reg),
-        participation_status: String.to_existing_atom(part)
-      }
+    Enum.map(rows, fn
+      [id, eid, rid, reg, part, group_id] ->
+        %{
+          id: Ecto.UUID.cast!(id),
+          event_id: Ecto.UUID.cast!(eid),
+          round_id: Ecto.UUID.cast!(rid),
+          registration_status: String.to_existing_atom(reg),
+          participation_status: String.to_existing_atom(part),
+          playing_group_id: cast_optional_uuid(group_id)
+        }
     end)
   end
+
+  defp cast_optional_uuid(nil), do: nil
+
+  defp cast_optional_uuid(value) do
+    {:ok, uuid} = Ecto.UUID.cast(value)
+    uuid
+  end
+
+  defp validate_group_cohesion(entries), do: CompetitionSideGroupCohesion.validate(entries)
 
   defp validate_scope(entries, round_id) do
     if Enum.all?(entries, &(&1.round_id == round_id)),
