@@ -13,6 +13,8 @@ defmodule GolfScoring.Competition.PlayingGroupTest do
   alias GolfScoring.Competition.RoundHole
   alias GolfScoring.Competition.Services.AssignEntryToGroup
   alias GolfScoring.Competition.Services.AssignPlayingGroupStart
+  alias GolfScoring.Competition.Services.ReplaceRoundEntry
+  alias GolfScoring.Competition.StartingParticipant
   alias GolfScoring.Competition.StartingPositionLabel
   alias GolfScoring.Repo
 
@@ -78,11 +80,11 @@ defmodule GolfScoring.Competition.PlayingGroupTest do
   test "setup capacity and starting readiness semantics" do
     assert PlayingGroupReadiness.setup_capacity_allowed?(0)
     assert PlayingGroupReadiness.setup_capacity_allowed?(1)
-    refute PlayingGroupReadiness.starting_ready?(0)
-    refute PlayingGroupReadiness.starting_ready?(1)
-    assert PlayingGroupReadiness.starting_ready?(2)
-    assert PlayingGroupReadiness.starting_ready?(4)
-    refute PlayingGroupReadiness.starting_ready?(5)
+    refute PlayingGroupReadiness.starting_participant_count_valid?(0)
+    refute PlayingGroupReadiness.starting_participant_count_valid?(1)
+    assert PlayingGroupReadiness.starting_participant_count_valid?(2)
+    assert PlayingGroupReadiness.starting_participant_count_valid?(4)
+    refute PlayingGroupReadiness.starting_participant_count_valid?(5)
   end
 
   test "PostgreSQL rejects invalid state, position, half start assignment, duplicate slot" do
@@ -200,12 +202,12 @@ defmodule GolfScoring.Competition.PlayingGroupTest do
     assert {:error, :group_capacity_exceeded} =
              AssignEntryToGroup.run(admin, event.id, round.id, List.last(entries).id, group.id)
 
-    assert group_member_count(group.id) == 4
+    assert current_starting_participant_count(group.id) == 4
 
     assert {:ok, _} =
              AssignEntryToGroup.run(admin, event.id, round.id, hd(entries).id, group.id)
 
-    assert group_member_count(group.id) == 4
+    assert current_starting_participant_count(group.id) == 4
 
     registration = create_staff_user!()
     assign_role!(admin, event, registration, :registration_staff)
@@ -311,6 +313,87 @@ defmodule GolfScoring.Competition.PlayingGroupTest do
     end
   end
 
+  test "terminal pre-start historical entries do not consume current starter capacity" do
+    %{event: event, round: round, admin: admin} = setup_round!()
+    {:ok, group} = Competition.create_playing_group(event.id, round.id, actor: admin)
+
+    entries =
+      for _ <- 1..4 do
+        entry = add_entry!(event, round, admin)
+
+        {:ok, assigned} =
+          AssignEntryToGroup.run(admin, event.id, round.id, entry.id, group.id)
+
+        assigned
+      end
+
+    assert current_starting_participant_count(group.id) == 4
+
+    [victim | _rest] = entries
+
+    assert {:ok, _} = Competition.mark_no_show(victim, actor: admin)
+
+    assert current_starting_participant_count(group.id) == 3
+    assert entry_playing_group_id(victim.id) == group.id
+
+    replacement = add_entry!(event, round, admin)
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(admin, event.id, round.id, replacement.id, group.id)
+
+    assert current_starting_participant_count(group.id) == 4
+  end
+
+  test "terminal registrations are rejected by assign_entry_to_group" do
+    %{event: event, round: round, admin: admin} = setup_round!()
+    {:ok, group} = Competition.create_playing_group(event.id, round.id, actor: admin)
+    entry = add_entry!(event, round, admin)
+    {:ok, assigned} = AssignEntryToGroup.run(admin, event.id, round.id, entry.id, group.id)
+
+    assert {:ok, _} = Competition.mark_no_show(assigned, actor: admin)
+
+    assert {:error, :not_current_starting_participant} =
+             AssignEntryToGroup.run(admin, event.id, round.id, assigned.id, group.id)
+  end
+
+  test "withdrawn_before_start linked to group is not counted as current starter" do
+    %{event: event, round: round, admin: admin} = setup_round!()
+    {:ok, group} = Competition.create_playing_group(event.id, round.id, actor: admin)
+    entry = add_entry!(event, round, admin)
+    {:ok, assigned} = AssignEntryToGroup.run(admin, event.id, round.id, entry.id, group.id)
+
+    assert {:ok, _} = Competition.withdraw_before_start(assigned, actor: admin)
+
+    assert current_starting_participant_count(group.id) == 0
+    assert entry_playing_group_id(assigned.id) == group.id
+
+    assert {:error, :not_current_starting_participant} =
+             AssignEntryToGroup.run(admin, event.id, round.id, assigned.id, group.id)
+  end
+
+  test "replaced_before_start linked to group is not counted as current starter" do
+    %{event: event, round: round, admin: admin} = setup_round!()
+    {:ok, group} = Competition.create_playing_group(event.id, round.id, actor: admin)
+    entry = add_entry!(event, round, admin)
+    {:ok, assigned} = AssignEntryToGroup.run(admin, event.id, round.id, entry.id, group.id)
+    replacement_player = create_player!()
+
+    assert {:ok, %{original: marked}} =
+             ReplaceRoundEntry.run(
+               admin,
+               event.id,
+               round.id,
+               assigned.id,
+               replacement_player.id
+             )
+
+    assert current_starting_participant_count(group.id) == 1
+    assert marked.playing_group_id == group.id
+
+    assert {:error, :not_current_starting_participant} =
+             AssignEntryToGroup.run(admin, event.id, round.id, marked.id, group.id)
+  end
+
   @tag :real_concurrency
   test "independent PostgreSQL backends enforce group capacity under concurrency" do
     fixture_key = System.unique_integer([:positive])
@@ -379,12 +462,90 @@ defmodule GolfScoring.Competition.PlayingGroupTest do
 
       final_count =
         Sandbox.unboxed_run(Repo, fn ->
-          group_member_count(fixture.group_id)
+          current_starting_participant_count(fixture.group_id)
         end)
 
       assert final_count == 4
     after
       cleanup_committed_capacity_fixture!(fixture)
+    end
+  end
+
+  @tag :real_concurrency
+  test "replacement and fifth-entry assignment race preserve four current starters" do
+    fixture_key = System.unique_integer([:positive])
+    prefix = "gls18-replace-race-#{fixture_key}"
+
+    fixture =
+      Sandbox.unboxed_run(Repo, fn ->
+        setup_committed_replacement_race_fixture!(prefix)
+      end)
+
+    try do
+      parent = self()
+
+      replace_task =
+        Task.async(fn ->
+          Sandbox.unboxed_run(Repo, fn ->
+            backend_pid = pg_backend_pid!()
+            send(parent, {:gls18_replace_ready, backend_pid})
+
+            receive do
+              :gls18_go ->
+                ReplaceRoundEntry.run(
+                  fixture.admin,
+                  fixture.event_id,
+                  fixture.round_id,
+                  fixture.replace_entry_id,
+                  fixture.replacement_player_id
+                )
+            after
+              10_000 -> flunk("replacement race worker did not receive go")
+            end
+          end)
+        end)
+
+      assign_task =
+        Task.async(fn ->
+          Sandbox.unboxed_run(Repo, fn ->
+            backend_pid = pg_backend_pid!()
+            send(parent, {:gls18_assign_ready, backend_pid})
+
+            receive do
+              :gls18_go ->
+                AssignEntryToGroup.run(
+                  fixture.admin,
+                  fixture.event_id,
+                  fixture.round_id,
+                  fixture.fifth_entry_id,
+                  fixture.group_id
+                )
+            after
+              10_000 -> flunk("assignment race worker did not receive go")
+            end
+          end)
+        end)
+
+      assert_receive {:gls18_replace_ready, pid_replace}, 10_000
+      assert_receive {:gls18_assign_ready, pid_assign}, 10_000
+      assert pid_replace != pid_assign
+
+      send(replace_task.pid, :gls18_go)
+      send(assign_task.pid, :gls18_go)
+
+      replace_result = Task.await(replace_task, 30_000)
+      assign_result = Task.await(assign_task, 30_000)
+
+      assert match?({:ok, _}, replace_result)
+      assert match?({:error, :group_capacity_exceeded}, assign_result)
+
+      Sandbox.unboxed_run(Repo, fn ->
+        assert current_starting_participant_count(fixture.group_id) == 4
+
+        assert entry_registration(fixture.replace_entry_id) == "replaced_before_start"
+      end)
+    after
+      cleanup_committed_replacement_race_fixture!(fixture)
     end
   end
 
@@ -439,14 +600,23 @@ defmodule GolfScoring.Competition.PlayingGroupTest do
     staff
   end
 
-  defp group_member_count(group_id) do
+  defp current_starting_participant_count(group_id) do
     [[count]] =
       Repo.query!(
-        "SELECT count(*)::int FROM round_entries WHERE playing_group_id = $1::uuid",
+        StartingParticipant.count_starters_in_group_sql(),
         [Ecto.UUID.dump!(group_id)]
       ).rows
 
     count
+  end
+
+  defp entry_registration(entry_id) do
+    [[status]] =
+      Repo.query!("SELECT registration_status FROM round_entries WHERE id = $1::uuid", [
+        Ecto.UUID.dump!(entry_id)
+      ]).rows
+
+    status
   end
 
   defp entry_playing_group_id(entry_id) do
@@ -561,6 +731,74 @@ defmodule GolfScoring.Competition.PlayingGroupTest do
         [dumped_event, dumped_staff]
       )
 
+      Repo.query!("DELETE FROM event_staff_assignments WHERE event_id = $1::uuid", [dumped_event])
+      Repo.query!("DELETE FROM events WHERE id = $1::uuid", [dumped_event])
+      Repo.query!("DELETE FROM staff_users WHERE id = $1::uuid", [dumped_staff])
+    end)
+  end
+
+  defp setup_committed_replacement_race_fixture!(email_prefix) do
+    event = create_event!()
+    admin = create_staff_user_for_prefix!(email_prefix)
+
+    Repo.query!(
+      "INSERT INTO event_staff_assignments (event_id, staff_user_id, role, status) VALUES ($1::uuid, $2::uuid, 'event_admin', 'active')",
+      [Ecto.UUID.dump!(event.id), Ecto.UUID.dump!(admin.id)]
+    )
+
+    course = create_course!(event, admin)
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    {:ok, group} = Competition.create_playing_group(event.id, round.id, actor: admin)
+
+    starter_entries =
+      for _ <- 1..4 do
+        entry = add_entry!(event, round, admin)
+
+        {:ok, assigned} =
+          AssignEntryToGroup.run(admin, event.id, round.id, entry.id, group.id)
+
+        assigned
+      end
+
+    [replace_entry | _rest] = starter_entries
+    fifth_entry = add_entry!(event, round, admin)
+    replacement_player = create_player!()
+
+    player_ids =
+      [replacement_player.id, fifth_entry.player_id | Enum.map(starter_entries, & &1.player_id)]
+
+    %{
+      event_id: event.id,
+      round_id: round.id,
+      course_id: course.id,
+      staff_id: admin.id,
+      admin: admin,
+      group_id: group.id,
+      replace_entry_id: replace_entry.id,
+      fifth_entry_id: fifth_entry.id,
+      replacement_player_id: replacement_player.id,
+      player_ids: player_ids
+    }
+  end
+
+  defp cleanup_committed_replacement_race_fixture!(fixture) do
+    Sandbox.unboxed_run(Repo, fn ->
+      dumped_event = Ecto.UUID.dump!(fixture.event_id)
+      dumped_round = Ecto.UUID.dump!(fixture.round_id)
+      dumped_course = Ecto.UUID.dump!(fixture.course_id)
+      dumped_staff = Ecto.UUID.dump!(fixture.staff_id)
+
+      Repo.query!("DELETE FROM round_entries WHERE round_id = $1::uuid", [dumped_round])
+      Repo.query!("DELETE FROM playing_groups WHERE round_id = $1::uuid", [dumped_round])
+      Repo.query!("DELETE FROM rounds WHERE id = $1::uuid", [dumped_round])
+
+      for player_id <- fixture.player_ids do
+        Repo.query!("DELETE FROM players WHERE id = $1::uuid", [Ecto.UUID.dump!(player_id)])
+      end
+
+      Repo.query!("DELETE FROM course_holes WHERE course_id = $1::uuid", [dumped_course])
+      Repo.query!("DELETE FROM tee_sets WHERE course_id = $1::uuid", [dumped_course])
+      Repo.query!("DELETE FROM courses WHERE id = $1::uuid", [dumped_course])
       Repo.query!("DELETE FROM event_staff_assignments WHERE event_id = $1::uuid", [dumped_event])
       Repo.query!("DELETE FROM events WHERE id = $1::uuid", [dumped_event])
       Repo.query!("DELETE FROM staff_users WHERE id = $1::uuid", [dumped_staff])

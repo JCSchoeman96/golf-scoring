@@ -95,7 +95,7 @@ defmodule GolfScoring.Competition.RoundEntry do
 
     create :create_replacement_entry_internal do
       public? false
-      accept [:event_id, :round_id, :player_id]
+      accept [:event_id, :round_id, :player_id, :playing_group_id]
       transaction? false
       change GolfScoring.Competition.Changes.CreateReplacementEntryInternal
     end

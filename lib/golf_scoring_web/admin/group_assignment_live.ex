@@ -11,7 +11,6 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
   alias GolfScoring.Competition.PlayingGroup
   alias GolfScoring.Competition.PlayingGroupReadiness
   alias GolfScoring.Competition.Round
-  alias GolfScoring.Competition.RoundEntry
   alias GolfScoring.Competition.RoundHole
   alias GolfScoring.Competition.Services.AssignEntryToGroup
   alias GolfScoring.Competition.Services.AssignPlayingGroupStart
@@ -91,6 +90,14 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
 
         {:error, :group_capacity_exceeded} ->
           {:noreply, put_flash(socket, :error, "That group is already full (maximum 4 players).")}
+
+        {:error, :not_current_starting_participant} ->
+          {:noreply,
+           put_flash(
+             socket,
+             :error,
+             "Only current expected or checked-in starters can be assigned."
+           )}
 
         {:error, {:invalid_round_state, state}} ->
           {:noreply,
@@ -206,8 +213,10 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
               <h2 class="font-semibold">Group {String.slice(group.id, 0, 8)}</h2>
               <p id={"group-member-count-#{group.id}"} class="text-sm text-base-content/70">
                 Members: {group.member_count} / {PlayingGroupReadiness.setup_capacity_max()}
-                <%= if not group.starting_ready? do %>
-                  <span class="text-warning"> · incomplete setup</span>
+                <%= if not group.setup_complete? do %>
+                  <span id={"group-incomplete-#{group.id}"} class="text-warning">
+                    · Incomplete setup
+                  </span>
                 <% end %>
               </p>
             </header>
@@ -234,7 +243,7 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
                   type="select"
                   label="Assign entry"
                   value=""
-                  options={entry_options(@unassigned_entries)}
+                  options={movable_entry_options(@eligible_starters, group.id)}
                   prompt="Select entry"
                 />
                 <button type="submit" class="btn btn-sm btn-outline">Assign</button>
@@ -286,18 +295,30 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
     round = Repo.get!(Round, round.id)
 
     groups = list_groups(round.id)
-    unassigned = list_unassigned_entries(round.id)
+    eligible_starters = list_eligible_current_starters(round.id)
+
+    unassigned =
+      eligible_starters
+      |> Enum.filter(&is_nil(&1.playing_group_id))
+      |> Enum.sort_by(&Ecto.UUID.dump!(&1.id))
+
     round_holes = list_round_holes(round.id)
 
     socket
     |> assign(:round, round)
     |> assign(:can_mutate, pre_open?(round))
     |> assign(:groups, groups)
+    |> assign(:eligible_starters, eligible_starters)
     |> assign(:unassigned_entries, unassigned)
     |> assign(:round_hole_options, round_hole_options(round_holes))
   end
 
   defp list_groups(round_id) do
+    eligible_by_group =
+      round_id
+      |> list_eligible_current_starters()
+      |> Enum.group_by(& &1.playing_group_id, & &1.id)
+
     holes_by_id =
       round_id
       |> list_round_holes()
@@ -308,7 +329,7 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
     |> Ash.read!(authorize?: false)
     |> Enum.sort_by(&Ecto.UUID.dump!(&1.id))
     |> Enum.map(fn group ->
-      member_ids = member_ids_for_group(group.id)
+      member_ids = Map.get(eligible_by_group, group.id, [])
       member_count = length(member_ids)
 
       start_label =
@@ -325,29 +346,37 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
         id: group.id,
         member_ids: member_ids,
         member_count: member_count,
-        starting_ready?: PlayingGroupReadiness.starting_ready?(member_count),
+        setup_complete?: PlayingGroupReadiness.group_setup_complete?(member_count, group),
         start_label: start_label
       }
     end)
   end
 
-  defp member_ids_for_group(group_id) do
+  defp list_eligible_current_starters(round_id) do
     Repo.query!(
       """
-      SELECT id::text FROM round_entries
-      WHERE playing_group_id = $1::uuid
+      SELECT id::text, playing_group_id::text
+      FROM round_entries
+      WHERE round_id = $1::uuid
+        AND registration_status IN ('expected', 'checked_in')
+        AND participation_status = 'not_started'
       ORDER BY id
       """,
-      [Ecto.UUID.dump!(group_id)]
+      [Ecto.UUID.dump!(round_id)]
     ).rows
-    |> Enum.map(fn [id] -> id end)
+    |> Enum.map(fn [id, group_id] ->
+      %{
+        id: id,
+        playing_group_id: cast_optional_uuid(group_id)
+      }
+    end)
   end
 
-  defp list_unassigned_entries(round_id) do
-    RoundEntry
-    |> Ash.Query.filter(round_id == ^round_id and is_nil(playing_group_id))
-    |> Ash.read!(authorize?: false)
-    |> Enum.sort_by(&Ecto.UUID.dump!(&1.id))
+  defp cast_optional_uuid(nil), do: nil
+
+  defp cast_optional_uuid(value) do
+    {:ok, uuid} = Ecto.UUID.cast(value)
+    uuid
   end
 
   defp list_round_holes(round_id) do
@@ -363,7 +392,9 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
     end)
   end
 
-  defp entry_options(entries) do
-    Enum.map(entries, fn entry -> {entry.id, entry.id} end)
+  defp movable_entry_options(starters, target_group_id) do
+    starters
+    |> Enum.reject(fn entry -> entry.playing_group_id == target_group_id end)
+    |> Enum.map(fn entry -> {entry.id, entry.id} end)
   end
 end

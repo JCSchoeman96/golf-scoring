@@ -152,6 +152,116 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLiveTest do
     refute html =~ "shotgun_slot"
   end
 
+  test "moves assigned current starter from group A to group B via UI", %{conn: conn} do
+    setup = seed_group_setup!()
+    conn = authenticate(conn, setup.admin.email)
+    entry = add_entry!(setup)
+
+    {:ok, view, _html} =
+      live(conn, ~p"/admin/events/#{setup.event.id}/rounds/#{setup.round.id}/groups")
+
+    render_click(element(view, "#create-playing-group-button"))
+    render_click(element(view, "#create-playing-group-button"))
+
+    [group_a, group_b] = extract_group_ids!(render(view))
+
+    render_submit(element(view, "#assign-entry-form-#{group_a}"), %{
+      "assignment" => %{"entry_id" => entry.id, "group_id" => group_a}
+    })
+
+    assert has_element?(view, "#group-members-#{group_a}", entry.id)
+
+    render_submit(element(view, "#assign-entry-form-#{group_b}"), %{
+      "assignment" => %{"entry_id" => entry.id, "group_id" => group_b}
+    })
+
+    refute has_element?(view, "#group-members-#{group_a}", entry.id)
+    assert has_element?(view, "#group-members-#{group_b}", entry.id)
+    assert entry_playing_group_id(entry.id) == group_b
+  end
+
+  test "terminal pre-start entry with historical group link is excluded from UI counts", %{
+    conn: conn
+  } do
+    setup = seed_group_setup!()
+    conn = authenticate(conn, setup.admin.email)
+    entry = add_entry!(setup)
+
+    {:ok, view, _html} =
+      live(conn, ~p"/admin/events/#{setup.event.id}/rounds/#{setup.round.id}/groups")
+
+    render_click(element(view, "#create-playing-group-button"))
+    [group_id] = extract_group_ids!(render(view))
+
+    render_submit(element(view, "#assign-entry-form-#{group_id}"), %{
+      "assignment" => %{"entry_id" => entry.id, "group_id" => group_id}
+    })
+
+    assert has_element?(view, "#group-member-count-#{group_id}", "Members: 1 / 4")
+
+    assert {:ok, _} = Competition.mark_no_show(entry, actor: setup.admin)
+
+    {:ok, view, _html} =
+      live(conn, ~p"/admin/events/#{setup.event.id}/rounds/#{setup.round.id}/groups")
+
+    assert has_element?(view, "#group-member-count-#{group_id}", "Members: 0 / 4")
+    refute has_element?(view, "#group-members-#{group_id}", entry.id)
+    refute render(view) =~ "Members: 2 / 4"
+  end
+
+  test "group setup completeness requires participant count and shotgun start assignment", %{
+    conn: conn
+  } do
+    setup = seed_group_setup!()
+    conn = authenticate(conn, setup.admin.email)
+    entry_one = add_entry!(setup)
+    entry_two = add_entry!(setup)
+
+    {:ok, view, _html} =
+      live(conn, ~p"/admin/events/#{setup.event.id}/rounds/#{setup.round.id}/groups")
+
+    render_click(element(view, "#create-playing-group-button"))
+    [group_id] = extract_group_ids!(render(view))
+
+    render_submit(element(view, "#assign-entry-form-#{group_id}"), %{
+      "assignment" => %{"entry_id" => entry_one.id, "group_id" => group_id}
+    })
+
+    render_submit(element(view, "#assign-entry-form-#{group_id}"), %{
+      "assignment" => %{"entry_id" => entry_two.id, "group_id" => group_id}
+    })
+
+    assert has_element?(view, "#group-incomplete-#{group_id}")
+
+    render_submit(element(view, "#assign-start-form-#{group_id}"), %{
+      "start" => %{
+        "group_id" => group_id,
+        "round_hole_id" => setup.hole_14.id,
+        "position" => "1"
+      }
+    })
+
+    refute has_element?(view, "#group-incomplete-#{group_id}")
+  end
+
+  defp extract_group_ids!(html) do
+    Regex.scan(~r/id="playing-group-([0-9a-f-]+)"/, html)
+    |> Enum.map(fn [_, id] -> id end)
+  end
+
+  defp entry_playing_group_id(entry_id) do
+    [[value]] =
+      Repo.query!(
+        "SELECT playing_group_id::text FROM round_entries WHERE id = $1::uuid",
+        [Ecto.UUID.dump!(entry_id)]
+      ).rows
+
+    case value do
+      nil -> nil
+      id -> Ecto.UUID.cast!(id)
+    end
+  end
+
   defp seed_group_setup! do
     event = create_event!()
     admin = create_event_admin!(event)

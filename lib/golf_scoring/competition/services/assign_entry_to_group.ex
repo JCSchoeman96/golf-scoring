@@ -6,6 +6,7 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
   alias GolfScoring.Accounts.EventAuthorityLock
   alias GolfScoring.Competition.PlayingGroupReadiness
   alias GolfScoring.Competition.RoundEntry
+  alias GolfScoring.Competition.StartingParticipant
   alias GolfScoring.Repo
 
   @manager_roles [:event_admin, :competition_manager]
@@ -27,6 +28,7 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
            :ok <- group_belongs_to_round(group, round_id),
            {:ok, entry} <- lock_round_entry(round_entry_id),
            :ok <- entry_belongs_to_round(entry, round_id, event_id),
+           :ok <- validate_start_eligible(entry),
            :ok <- validate_capacity(group.id, entry),
            {:ok, updated} <- assign_entry(entry, group.id) do
         updated
@@ -140,9 +142,22 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
     end
   end
 
-  defp validate_capacity(group_id, %{playing_group_id: current} = _entry)
-       when current == group_id,
-       do: :ok
+  defp validate_start_eligible(entry) do
+    if StartingParticipant.current_starting_participant?(entry) do
+      :ok
+    else
+      {:error, :not_current_starting_participant}
+    end
+  end
+
+  defp validate_capacity(group_id, %{playing_group_id: current, id: _entry_id} = entry)
+       when current == group_id do
+    if StartingParticipant.current_starting_participant?(entry) do
+      :ok
+    else
+      {:error, :not_current_starting_participant}
+    end
+  end
 
   defp validate_capacity(group_id, entry) do
     [[count]] =
@@ -152,6 +167,8 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
         FROM round_entries
         WHERE playing_group_id = $1::uuid
           AND id <> $2::uuid
+          AND registration_status IN ('expected', 'checked_in')
+          AND participation_status = 'not_started'
         """,
         [Ecto.UUID.dump!(group_id), Ecto.UUID.dump!(entry.id)]
       ).rows

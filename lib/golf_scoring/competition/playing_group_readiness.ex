@@ -20,7 +20,22 @@ defmodule GolfScoring.Competition.PlayingGroupReadiness do
 
   def setup_capacity_allowed?(_), do: false
 
-  @spec starting_ready?(non_neg_integer()) :: boolean()
-  def starting_ready?(count) when is_integer(count) and count in 2..4, do: true
-  def starting_ready?(_), do: false
+  @spec starting_participant_count_valid?(non_neg_integer()) :: boolean()
+  def starting_participant_count_valid?(count) when is_integer(count) and count in 2..4, do: true
+  def starting_participant_count_valid?(_), do: false
+
+  @spec group_setup_complete?(non_neg_integer(), map()) :: boolean()
+  def group_setup_complete?(current_starting_count, playing_group) do
+    starting_participant_count_valid?(current_starting_count) and
+      start_assignment_present?(playing_group)
+  end
+
+  defp start_assignment_present?(%{
+         starting_round_hole_id: hole_id,
+         starting_position: position
+       })
+       when not is_nil(hole_id) and not is_nil(position),
+       do: true
+
+  defp start_assignment_present?(_), do: false
 end
