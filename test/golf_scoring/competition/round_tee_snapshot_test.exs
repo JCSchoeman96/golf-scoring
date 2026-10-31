@@ -282,7 +282,9 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
         actor: replacement
       )
 
-    assert {:error, :forbidden} = SnapshotRoundTeeProfiles.run(stale_admin, round.id, [profile.id])
+    assert {:error, :forbidden} =
+             SnapshotRoundTeeProfiles.run(stale_admin, round.id, [profile.id])
+
     assert snapshot_values(snapshot.id) == before
   end
 
@@ -293,7 +295,15 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
     course_b = create_course!(event, admin, "B")
     holes_a = create_eighteen_holes!(event, admin, course_a)
     tee_set_b = create_tee_set!(event, admin, course_b, "Red")
-    profile_b = create_profile!(event, admin, tee_set_b, create_eighteen_holes!(event, admin, course_b), "Women")
+
+    profile_b =
+      create_profile!(
+        event,
+        admin,
+        tee_set_b,
+        create_eighteen_holes!(event, admin, course_b),
+        "Women"
+      )
 
     {:ok, round} = Competition.create_round(event.id, course_a.id, actor: admin)
     {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes_a, & &1.id))

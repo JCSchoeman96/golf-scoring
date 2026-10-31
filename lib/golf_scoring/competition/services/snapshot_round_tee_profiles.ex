@@ -48,30 +48,39 @@ defmodule GolfScoring.Competition.Services.SnapshotRoundTeeProfiles do
   end
 
   defp lock_round(round_id) do
-    case round_row(round_id, for_update: true) do
+    case round_row_for_update(round_id) do
       nil -> {:error, :round_not_found}
       round -> {:ok, round}
     end
   end
 
-  defp round_row(round_id, opts \\ []) do
-    suffix = if Keyword.get(opts, :for_update), do: " FOR UPDATE", else: ""
-
+  defp round_row(round_id) do
     case Repo.query!(
-           "SELECT id::text, event_id::text, course_id::text, state FROM rounds WHERE id = $1::uuid#{suffix}",
+           "SELECT id::text, event_id::text, course_id::text, state FROM rounds WHERE id = $1::uuid",
            [Ecto.UUID.dump!(round_id)]
          ).rows do
-      [[id, event_id, course_id, state]] ->
-        %{
-          id: Ecto.UUID.cast!(id),
-          event_id: Ecto.UUID.cast!(event_id),
-          course_id: Ecto.UUID.cast!(course_id),
-          state: state
-        }
-
-      [] ->
-        nil
+      [[id, event_id, course_id, state]] -> decode_round_row(id, event_id, course_id, state)
+      [] -> nil
     end
+  end
+
+  defp round_row_for_update(round_id) do
+    case Repo.query!(
+           "SELECT id::text, event_id::text, course_id::text, state FROM rounds WHERE id = $1::uuid FOR UPDATE",
+           [Ecto.UUID.dump!(round_id)]
+         ).rows do
+      [[id, event_id, course_id, state]] -> decode_round_row(id, event_id, course_id, state)
+      [] -> nil
+    end
+  end
+
+  defp decode_round_row(id, event_id, course_id, state) do
+    %{
+      id: Ecto.UUID.cast!(id),
+      event_id: Ecto.UUID.cast!(event_id),
+      course_id: Ecto.UUID.cast!(course_id),
+      state: state
+    }
   end
 
   defp authorize(actor_id, event_id) do
