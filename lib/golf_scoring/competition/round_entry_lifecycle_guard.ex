@@ -5,6 +5,7 @@ defmodule GolfScoring.Competition.RoundEntryLifecycleGuard do
 
   alias GolfScoring.Accounts.Checks.ActiveEventRole
   alias GolfScoring.Accounts.EventAuthorityLock
+  alias GolfScoring.Competition.GroupRoleAssignmentGuard
   alias GolfScoring.Competition.RoundEntry
   alias GolfScoring.Repo
 
@@ -30,6 +31,7 @@ defmodule GolfScoring.Competition.RoundEntryLifecycleGuard do
          {:ok, round} <- lock_round(entry.round_id),
          :ok <- round_allows_operation(round, operation),
          {:ok, locked_entry} <- lock_round_entry(entry.id),
+         :ok <- validate_active_role_not_blocking(locked_entry.id, operation),
          :ok <- validate_transition(locked_entry, operation),
          {:ok, attrs} <- build_attrs(locked_entry, operation, actor_id) do
       Enum.reduce(attrs, Map.put(changeset, :data, locked_entry), fn {field, value}, cs ->
@@ -99,6 +101,21 @@ defmodule GolfScoring.Competition.RoundEntryLifecycleGuard do
   end
 
   defp round_allows_operation(_round, _operation), do: :ok
+
+  defp validate_active_role_not_blocking(_entry_id, :check_in_round_entry), do: :ok
+
+  defp validate_active_role_not_blocking(entry_id, operation)
+       when operation in [:mark_no_show, :withdraw_before_start] do
+    case GroupRoleAssignmentGuard.reject_active_role_registration_transition(entry_id) do
+      :ok ->
+        :ok
+
+      {:error, :active_group_role_assignment_blocks_registration_transition} ->
+        {:error, "RoundEntry holds an active group role; hand over or revoke first"}
+    end
+  end
+
+  defp validate_active_role_not_blocking(_entry_id, _operation), do: :ok
 
   defp validate_transition(%{registration_status: status}, _operation)
        when status in [:no_show, :withdrawn_before_start, :replaced_before_start] do

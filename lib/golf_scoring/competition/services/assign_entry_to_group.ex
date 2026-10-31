@@ -8,6 +8,7 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
   alias GolfScoring.Accounts.EventAuthorityLock
   alias GolfScoring.Competition.CompetitionSideGroupCohesion
   alias GolfScoring.Competition.CompetitionSideMembership
+  alias GolfScoring.Competition.GroupRoleAssignmentGuard
   alias GolfScoring.Competition.PlayingGroupReadiness
   alias GolfScoring.Competition.RoundEntry
   alias GolfScoring.Competition.StartingParticipant
@@ -33,6 +34,7 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
            {:ok, entry} <- lock_round_entry(round_entry_id),
            :ok <- entry_belongs_to_round(entry, round_id, event_id),
            :ok <- validate_start_eligible(entry),
+           :ok <- GroupRoleAssignmentGuard.reject_active_role_group_move(entry, playing_group_id),
            :ok <- validate_competition_side_group_cohesion(round_id, entry.id, playing_group_id),
            :ok <- validate_capacity(group.id, entry),
            {:ok, updated} <- assign_entry(entry, group.id) do

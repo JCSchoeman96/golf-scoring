@@ -3,8 +3,11 @@ defmodule GolfScoring.Competition do
 
   use Ash.Domain
 
+  alias GolfScoring.Competition.Services.AssignGroupRole
   alias GolfScoring.Competition.Services.ConfigureRoundCompetition
   alias GolfScoring.Competition.Services.CreateCompetitionSide
+  alias GolfScoring.Competition.Services.HandoverGroupRole
+  alias GolfScoring.Competition.Services.RevokeGroupRole
   alias GolfScoring.Competition.Services.SetSideMembership
 
   resources do
@@ -57,6 +60,7 @@ defmodule GolfScoring.Competition do
 
     resource GolfScoring.Competition.CompetitionSideMembership
     resource GolfScoring.Competition.CompetitionSideResult
+    resource GolfScoring.Competition.GroupRoleAssignment
   end
 
   def configure_round_competition(actor, event_id, round_id, attrs) do
@@ -83,5 +87,63 @@ defmodule GolfScoring.Competition do
       competition_side_id,
       round_entry_ids
     )
+  end
+
+  def assign_primary_scorer(actor, event_id, round_id, playing_group_id, round_entry_id) do
+    AssignGroupRole.run(
+      actor,
+      event_id,
+      round_id,
+      playing_group_id,
+      round_entry_id,
+      :primary_scorer
+    )
+  end
+
+  def assign_designated_verifier(actor, event_id, round_id, playing_group_id, round_entry_id) do
+    AssignGroupRole.run(
+      actor,
+      event_id,
+      round_id,
+      playing_group_id,
+      round_entry_id,
+      :designated_verifier
+    )
+  end
+
+  def handover_primary_scorer(actor, event_id, round_id, playing_group_id, replacement_entry_id) do
+    HandoverGroupRole.run(
+      actor,
+      event_id,
+      round_id,
+      playing_group_id,
+      replacement_entry_id,
+      :primary_scorer
+    )
+  end
+
+  def handover_designated_verifier(
+        actor,
+        event_id,
+        round_id,
+        playing_group_id,
+        replacement_entry_id
+      ) do
+    HandoverGroupRole.run(
+      actor,
+      event_id,
+      round_id,
+      playing_group_id,
+      replacement_entry_id,
+      :designated_verifier
+    )
+  end
+
+  def revoke_primary_scorer(actor, event_id, round_id, playing_group_id, reason) do
+    RevokeGroupRole.run(actor, event_id, round_id, playing_group_id, :primary_scorer, reason)
+  end
+
+  def revoke_designated_verifier(actor, event_id, round_id, playing_group_id, reason) do
+    RevokeGroupRole.run(actor, event_id, round_id, playing_group_id, :designated_verifier, reason)
   end
 end
