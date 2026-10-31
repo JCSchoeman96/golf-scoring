@@ -220,7 +220,7 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
                [e1.id, e2.id]
              )
 
-    assert side_member_entry_ids(side.id) == [keeper_a.id, keeper_b.id]
+    assert Enum.sort(side_member_entry_ids(side.id)) == Enum.sort([keeper_a.id, keeper_b.id])
   end
 
   test "set_side_membership allows partnership when one member is still unassigned to a playing group" do
