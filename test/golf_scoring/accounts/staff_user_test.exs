@@ -137,7 +137,7 @@ defmodule GolfScoring.Accounts.StaffUserTest do
     assert stored_hash != @password
     assert String.starts_with?(stored_hash, "$2")
 
-    assert {:ok, [read_user]} = Ash.read(StaffUser, authorize?: false)
+    assert {:ok, read_user} = Ash.get(StaffUser, user.id, authorize?: false)
     assert %Ash.NotLoaded{field: :hashed_password} = read_user.hashed_password
     refute inspect(user) =~ stored_hash
     refute inspect(user) =~ @password

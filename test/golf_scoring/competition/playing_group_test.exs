@@ -13,7 +13,10 @@ defmodule GolfScoring.Competition.PlayingGroupTest do
   alias GolfScoring.Competition.RoundHole
   alias GolfScoring.Competition.Services.AssignEntryToGroup
   alias GolfScoring.Competition.Services.AssignPlayingGroupStart
+  alias GolfScoring.Competition.Services.ConfigureRoundCompetition
+  alias GolfScoring.Competition.Services.CreateCompetitionSide
   alias GolfScoring.Competition.Services.ReplaceRoundEntry
+  alias GolfScoring.Competition.Services.SetSideMembership
   alias GolfScoring.Competition.StartingParticipant
   alias GolfScoring.Competition.StartingPositionLabel
   alias GolfScoring.Repo
@@ -186,6 +189,124 @@ defmodule GolfScoring.Competition.PlayingGroupTest do
 
     assert cross_member.postgres.code == :foreign_key_violation
     assert cross_member.postgres.constraint == @entry_group_fkey
+  end
+
+  test "assign_entry_to_group rejects splitting current partnership across playing groups" do
+    %{event: event, round: round, admin: admin} = setup_round!()
+
+    assert {:ok, competition} =
+             ConfigureRoundCompetition.run(admin, event.id, round.id, %{
+               solo_sides_permitted: true
+             })
+
+    {:ok, side} =
+      CreateCompetitionSide.run(admin, event.id, round.id, competition.id, :partnership)
+
+    {:ok, group_a} = Competition.create_playing_group(event.id, round.id, actor: admin)
+    {:ok, group_b} = Competition.create_playing_group(event.id, round.id, actor: admin)
+
+    entry_one = add_entry!(event, round, admin)
+    entry_two = add_entry!(event, round, admin)
+
+    assert {:ok, _} =
+             SetSideMembership.run(
+               admin,
+               event.id,
+               round.id,
+               competition.id,
+               side.id,
+               [entry_one.id, entry_two.id]
+             )
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(admin, event.id, round.id, entry_one.id, group_a.id)
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(admin, event.id, round.id, entry_two.id, group_a.id)
+
+    assert {:error, :competition_side_split_across_groups} =
+             AssignEntryToGroup.run(admin, event.id, round.id, entry_one.id, group_b.id)
+
+    assert entry_playing_group_id(entry_one.id) == group_a.id
+    assert entry_playing_group_id(entry_two.id) == group_a.id
+  end
+
+  test "assign_entry_to_group allows partnership regrouping after side reconfiguration" do
+    %{event: event, round: round, admin: admin} = setup_round!()
+
+    assert {:ok, competition} =
+             ConfigureRoundCompetition.run(admin, event.id, round.id, %{
+               solo_sides_permitted: true
+             })
+
+    {:ok, side} =
+      CreateCompetitionSide.run(admin, event.id, round.id, competition.id, :partnership)
+
+    {:ok, group_a} = Competition.create_playing_group(event.id, round.id, actor: admin)
+    {:ok, group_b} = Competition.create_playing_group(event.id, round.id, actor: admin)
+
+    entry_one = add_entry!(event, round, admin)
+    entry_two = add_entry!(event, round, admin)
+    entry_three = add_entry!(event, round, admin)
+
+    assert {:ok, _} =
+             SetSideMembership.run(
+               admin,
+               event.id,
+               round.id,
+               competition.id,
+               side.id,
+               [entry_one.id, entry_two.id]
+             )
+
+    for entry <- [entry_one, entry_two] do
+      assert {:ok, _} =
+               AssignEntryToGroup.run(admin, event.id, round.id, entry.id, group_a.id)
+    end
+
+    assert {:ok, _} =
+             SetSideMembership.run(
+               admin,
+               event.id,
+               round.id,
+               competition.id,
+               side.id,
+               [entry_two.id, entry_three.id]
+             )
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(admin, event.id, round.id, entry_one.id, group_b.id)
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(admin, event.id, round.id, entry_two.id, group_b.id)
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(admin, event.id, round.id, entry_three.id, group_b.id)
+
+    assert {:ok, _} =
+             SetSideMembership.run(
+               admin,
+               event.id,
+               round.id,
+               competition.id,
+               side.id,
+               [entry_one.id, entry_three.id]
+             )
+
+    assert entry_playing_group_id(entry_one.id) == group_b.id
+    assert entry_playing_group_id(entry_three.id) == group_b.id
+    assert entry_playing_group_id(entry_two.id) == group_b.id
+  end
+
+  test "assign_entry_to_group still assigns entries without competition side membership" do
+    %{event: event, round: round, admin: admin} = setup_round!()
+    {:ok, group} = Competition.create_playing_group(event.id, round.id, actor: admin)
+    entry = add_entry!(event, round, admin)
+
+    assert {:ok, assigned} =
+             AssignEntryToGroup.run(admin, event.id, round.id, entry.id, group.id)
+
+    assert assigned.playing_group_id == group.id
   end
 
   test "assign_entry_to_group enforces capacity, idempotency, and authorization" do
