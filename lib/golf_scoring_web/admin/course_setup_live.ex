@@ -7,6 +7,7 @@ defmodule GolfScoringWeb.Admin.CourseSetupLive do
   alias GolfScoring.Accounts.StaffUser
   alias GolfScoring.GolfCatalog
   alias GolfScoring.Repo
+  alias GolfScoringWeb.Admin.InputParsing
 
   @impl true
   def mount(%{"event_id" => event_id}, _session, socket) do
@@ -81,24 +82,26 @@ defmodule GolfScoringWeb.Admin.CourseSetupLive do
     event_id = socket.assigns.event_id
     course_id = socket.assigns.selected_course_id
 
-    attrs =
-      params
-      |> Map.put("course_id", course_id)
-      |> Map.update("hole_number", nil, &String.to_integer/1)
+    with {:ok, hole_number} <- InputParsing.parse_positive_integer(params["hole_number"]) do
+      attrs = %{course_id: course_id, hole_number: hole_number}
 
-    case GolfCatalog.configure_course_hole(event_id, attrs, actor: staff) do
-      {:ok, _} ->
-        {:noreply,
-         socket
-         |> put_flash(:info, "Course hole saved.")
-         |> refresh_course_details(course_id)}
+      case GolfCatalog.configure_course_hole(event_id, attrs, actor: staff) do
+        {:ok, _} ->
+          {:noreply,
+           socket
+           |> put_flash(:info, "Course hole saved.")
+           |> refresh_course_details(course_id)}
 
-      {:error, %Ash.Error.Forbidden{}} ->
-        {:noreply,
-         put_flash(socket, :error, "Catalog changes require an active Event Admin role.")}
+        {:error, %Ash.Error.Forbidden{}} ->
+          {:noreply,
+           put_flash(socket, :error, "Catalog changes require an active Event Admin role.")}
 
-      {:error, _} ->
-        {:noreply, put_flash(socket, :error, "Could not save the Course hole.")}
+        {:error, _} ->
+          {:noreply, put_flash(socket, :error, "Could not save the Course hole.")}
+      end
+    else
+      {:error, :invalid_input} ->
+        {:noreply, put_flash(socket, :error, "Hole number must be a positive integer.")}
     end
   end
 
@@ -131,30 +134,43 @@ defmodule GolfScoringWeb.Admin.CourseSetupLive do
     staff = Repo.get!(StaffUser, socket.assigns.current_staff_user.id)
     event_id = socket.assigns.event_id
     course_id = socket.assigns.selected_course_id
+    course_holes = socket.assigns.course_holes
 
-    hole_ratings = build_hole_ratings(params, course_id)
+    with {:ok, tee_set_id} <- InputParsing.parse_uuid(params["tee_set_id"]),
+         {:ok, slope_rating} <- InputParsing.parse_positive_integer(params["slope_rating"]),
+         {:ok, total_par} <- InputParsing.parse_positive_integer(params["total_par"]),
+         {:ok, course_rating} <- InputParsing.parse_decimal(params["course_rating"]),
+         {:ok, hole_ratings} <- build_hole_ratings(params, course_holes),
+         rating_label when is_binary(rating_label) <- present_string(params["rating_label"]) do
+      attrs = %{
+        tee_set_id: tee_set_id,
+        rating_label: rating_label,
+        course_rating: course_rating,
+        slope_rating: slope_rating,
+        total_par: total_par,
+        hole_ratings: hole_ratings
+      }
 
-    attrs =
-      params
-      |> Map.take(["tee_set_id", "rating_label", "course_rating", "slope_rating", "total_par"])
-      |> Map.put("hole_ratings", hole_ratings)
-      |> Map.update("slope_rating", nil, &String.to_integer/1)
-      |> Map.update("total_par", nil, &String.to_integer/1)
-      |> Map.update("course_rating", nil, &Decimal.new/1)
+      case GolfCatalog.configure_tee_rating_profile(event_id, attrs, actor: staff) do
+        {:ok, _} ->
+          {:noreply,
+           socket
+           |> put_flash(:info, "Tee rating profile saved.")
+           |> refresh_course_details(course_id)}
 
-    case GolfCatalog.configure_tee_rating_profile(event_id, attrs, actor: staff) do
-      {:ok, _} ->
-        {:noreply,
-         socket
-         |> put_flash(:info, "Tee rating profile saved.")
-         |> refresh_course_details(course_id)}
+        {:error, %Ash.Error.Forbidden{}} ->
+          {:noreply,
+           put_flash(socket, :error, "Catalog changes require an active Event Admin role.")}
 
-      {:error, %Ash.Error.Forbidden{}} ->
-        {:noreply,
-         put_flash(socket, :error, "Catalog changes require an active Event Admin role.")}
+        {:error, _} ->
+          {:noreply, put_flash(socket, :error, "Could not save the Tee rating profile.")}
+      end
+    else
+      {:error, :invalid_input} ->
+        {:noreply, put_flash(socket, :error, "Tee profile fields must be valid.")}
 
-      {:error, _} ->
-        {:noreply, put_flash(socket, :error, "Could not save the Tee rating profile.")}
+      _ ->
+        {:noreply, put_flash(socket, :error, "Rating label is required.")}
     end
   end
 
@@ -252,6 +268,34 @@ defmodule GolfScoringWeb.Admin.CourseSetupLive do
                 />
                 <.input name="tee_profile[slope_rating]" type="number" label="Slope" value="113" />
                 <.input name="tee_profile[total_par]" type="number" label="Total par" value="72" />
+                <div id="tee-profile-hole-ratings" class="mt-4 space-y-3">
+                  <h3 class="text-sm font-semibold">Per-hole ratings</h3>
+                  <%= for hole <- @course_holes do %>
+                    <div class="grid gap-2 rounded-lg border border-base-200 p-3 sm:grid-cols-4">
+                      <p class="text-sm font-medium sm:col-span-4">
+                        Physical hole {hole.hole_number}
+                      </p>
+                      <.input
+                        name={"tee_profile[hole_ratings][#{hole.id}][par]"}
+                        type="number"
+                        label="Par"
+                        value="4"
+                      />
+                      <.input
+                        name={"tee_profile[hole_ratings][#{hole.id}][stroke_index]"}
+                        type="number"
+                        label="Stroke index"
+                        value={to_string(hole.hole_number)}
+                      />
+                      <.input
+                        name={"tee_profile[hole_ratings][#{hole.id}][distance_m]"}
+                        type="number"
+                        label="Distance (m)"
+                        value=""
+                      />
+                    </div>
+                  <% end %>
+                </div>
                 <button id="tee-profile-save-button" type="submit" class="btn btn-primary mt-3">
                   Save tee profile
                 </button>
@@ -309,15 +353,38 @@ defmodule GolfScoringWeb.Admin.CourseSetupLive do
     |> Enum.map(fn [id, label] -> %{id: Ecto.UUID.cast!(id), rating_label: label} end)
   end
 
-  defp build_hole_ratings(_params, course_id) do
-    list_course_holes(course_id)
-    |> Enum.map(fn hole ->
-      %{
-        course_hole_id: hole.id,
-        par: 4,
-        stroke_index: hole.hole_number,
-        distance_m: 300 + hole.hole_number
-      }
+  defp build_hole_ratings(params, course_holes) when is_list(course_holes) do
+    ratings_params = Map.get(params, "hole_ratings", %{})
+
+    course_holes
+    |> Enum.reduce_while({:ok, []}, fn hole, {:ok, acc} ->
+      hole_params = Map.get(ratings_params, to_string(hole.id), %{})
+
+      with {:ok, par} <- InputParsing.parse_positive_integer(hole_params["par"]),
+           {:ok, stroke_index} <- InputParsing.parse_positive_integer(hole_params["stroke_index"]),
+           {:ok, distance_m} <-
+             InputParsing.parse_optional_positive_integer(hole_params["distance_m"]) do
+        rating = %{
+          course_hole_id: hole.id,
+          par: par,
+          stroke_index: stroke_index,
+          distance_m: distance_m
+        }
+
+        {:cont, {:ok, [rating | acc]}}
+      else
+        {:error, :invalid_input} -> {:halt, {:error, :invalid_input}}
+      end
     end)
+    |> case do
+      {:ok, ratings} -> {:ok, Enum.reverse(ratings)}
+      error -> error
+    end
   end
+
+  defp present_string(value) when is_binary(value) do
+    if String.trim(value) == "", do: nil, else: String.trim(value)
+  end
+
+  defp present_string(_), do: nil
 end

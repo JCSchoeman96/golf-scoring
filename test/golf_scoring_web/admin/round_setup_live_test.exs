@@ -30,11 +30,12 @@ defmodule GolfScoringWeb.Admin.RoundSetupLiveTest do
     refute render(view) =~ "open_scoring"
     refute render(view) =~ "Open scoring"
 
-    route_ids = Enum.map_join(setup.holes, ",", & &1.id)
+    route_params =
+      setup.holes
+      |> Enum.with_index(1)
+      |> Map.new(fn {hole, play_order} -> {"hole_#{play_order}", hole.id} end)
 
-    render_submit(element(view, "#round-route-form"), %{
-      "route" => %{"course_hole_ids" => route_ids}
-    })
+    render_submit(element(view, "#round-route-form"), %{"route" => route_params})
 
     assert has_element?(view, "#round-route-list")
 
@@ -74,6 +75,44 @@ defmodule GolfScoringWeb.Admin.RoundSetupLiveTest do
 
     assert {:error, {:live_redirect, %{to: "/admin"}}} =
              live(conn, ~p"/admin/events/#{other_event.id}/rounds/#{setup.round.id}/setup")
+  end
+
+  test "malformed snapshot selection shows a controlled error", %{conn: conn} do
+    setup = seed_round_setup!()
+    conn = authenticate(conn, setup.admin.email)
+
+    {:ok, view, _html} =
+      live(conn, ~p"/admin/events/#{setup.event.id}/rounds/#{setup.round.id}/setup")
+
+    html =
+      render_submit(element(view, "#round-snapshot-form"), %{
+        "snapshot" => %{"profile_ids" => ["not-a-uuid"]}
+      })
+
+    assert html =~ "valid"
+  end
+
+  test "stale Event Admin cannot mutate after assignment revocation", %{conn: conn} do
+    setup = seed_round_setup!()
+    conn = authenticate(conn, setup.admin.email)
+    replacement = create_event_admin!(setup.event)
+
+    {:ok, view, _html} =
+      live(conn, ~p"/admin/events/#{setup.event.id}/rounds/#{setup.round.id}/setup")
+
+    {:ok, _} =
+      Accounts.revoke_event_staff_role(
+        active_assignment(setup.event, setup.admin),
+        actor: replacement
+      )
+
+    route_params =
+      setup.holes
+      |> Enum.with_index(1)
+      |> Map.new(fn {hole, play_order} -> {"hole_#{play_order}", hole.id} end)
+
+    html = render_submit(element(view, "#round-route-form"), %{"route" => route_params})
+    assert html =~ "not allowed" or html =~ "Route save failed"
   end
 
   test "no scoring-open control is exposed", %{conn: conn} do
@@ -198,5 +237,16 @@ defmodule GolfScoringWeb.Admin.RoundSetupLiveTest do
         %{event_id: event.id, staff_user_id: staff.id, role: role},
         actor: actor
       )
+  end
+
+  defp active_assignment(event, staff) do
+    [[assignment_id]] =
+      Repo.query!(
+        "SELECT id::text FROM event_staff_assignments WHERE event_id = $1::uuid AND staff_user_id = $2::uuid AND role = 'event_admin' AND status = 'active'",
+        [Ecto.UUID.dump!(event.id), Ecto.UUID.dump!(staff.id)]
+      ).rows
+
+    Accounts.EventStaffAssignment
+    |> Ash.get!(assignment_id, authorize?: false)
   end
 end

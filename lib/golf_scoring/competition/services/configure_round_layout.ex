@@ -23,6 +23,7 @@ defmodule GolfScoring.Competition.Services.ConfigureRoundLayout do
            :ok <- round_accepts_layout(round),
            {:ok, holes_by_id} <- load_course_holes(round.course_id, course_hole_ids),
            :ok <- validate_route(course_hole_ids, round.course_id, holes_by_id),
+           :ok <- validate_layout_compatible_with_snapshots(round.id, course_hole_ids),
            {:ok, route} <- apply_layout(round, course_hole_ids, holes_by_id) do
         route
       else
@@ -135,6 +136,35 @@ defmodule GolfScoring.Competition.Services.ConfigureRoundLayout do
 
       true ->
         :ok
+    end
+  end
+
+  defp validate_layout_compatible_with_snapshots(round_id, course_hole_ids) do
+    [[has_snapshots?]] =
+      Repo.query!(
+        """
+        SELECT EXISTS (
+          SELECT 1 FROM round_tee_profile_snapshots WHERE round_id = $1::uuid
+        )
+        """,
+        [Ecto.UUID.dump!(round_id)]
+      ).rows
+
+    if has_snapshots? do
+      current_ids =
+        Repo.query!(
+          "SELECT course_hole_id::text FROM round_holes WHERE round_id = $1::uuid ORDER BY play_order",
+          [Ecto.UUID.dump!(round_id)]
+        ).rows
+        |> Enum.map(fn [id] -> Ecto.UUID.cast!(id) end)
+
+      if MapSet.new(current_ids) == MapSet.new(course_hole_ids) do
+        :ok
+      else
+        {:error, :round_snapshots_block_route_change}
+      end
+    else
+      :ok
     end
   end
 

@@ -240,7 +240,7 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
 
     {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
 
-    assert {:error, :no_tee_rating_profiles} = SnapshotRoundTeeProfiles.run(admin, round.id, [])
+    assert {:ok, []} = SnapshotRoundTeeProfiles.run(admin, round.id, [])
 
     assert {:error, :duplicate_tee_rating_profile} =
              SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id, profile.id])
@@ -310,6 +310,187 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
 
     assert {:error, :cross_course_tee_profile} =
              SnapshotRoundTeeProfiles.run(admin, round.id, [profile_b.id])
+  end
+
+  test "route structural change is blocked while snapshots exist unless snapshots are cleared" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    tee_set = create_tee_set!(event, admin, course, "White")
+    profile = create_profile!(event, admin, tee_set, holes, "Men")
+
+    {:ok, spare_hole} =
+      GolfCatalog.configure_course_hole(
+        event.id,
+        %{course_id: course.id, hole_number: 19},
+        actor: admin
+      )
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    route_ids = Enum.map(holes, & &1.id)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, route_ids)
+    assert {:ok, [_]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+
+    swapped = [spare_hole.id | Enum.take(route_ids, 17)]
+
+    assert {:error, :round_snapshots_block_route_change} =
+             ConfigureRoundLayout.run(admin, round.id, swapped)
+
+    assert {:ok, []} = SnapshotRoundTeeProfiles.run(admin, round.id, [])
+    assert {:ok, _} = ConfigureRoundLayout.run(admin, round.id, swapped)
+  end
+
+  test "missing route-hole rating is rejected without mutating snapshots" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    tee_set = create_tee_set!(event, admin, course, "White")
+
+    partial_ratings =
+      holes
+      |> Enum.take(17)
+      |> Enum.map(fn hole ->
+        %{course_hole_id: hole.id, par: 4, stroke_index: hole.hole_number, distance_m: 300}
+      end)
+
+    {:ok, partial_profile} =
+      GolfCatalog.configure_tee_rating_profile(
+        event.id,
+        %{
+          tee_set_id: tee_set.id,
+          rating_label: "Partial",
+          course_rating: D.new("72.0"),
+          slope_rating: 113,
+          total_par: 68,
+          hole_ratings: partial_ratings
+        },
+        actor: admin
+      )
+
+    full_profile = create_profile!(event, admin, tee_set, holes, "Full")
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
+    assert {:ok, [existing]} = SnapshotRoundTeeProfiles.run(admin, round.id, [full_profile.id])
+    before = snapshot_values(existing.id)
+
+    assert {:error, :missing_round_hole_rating} =
+             SnapshotRoundTeeProfiles.run(admin, round.id, [partial_profile.id])
+
+    assert snapshot_values(existing.id) == before
+  end
+
+  test "extra source hole ratings outside the round route remain valid" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    tee_set = create_tee_set!(event, admin, course, "White")
+
+    {:ok, spare_hole} =
+      GolfCatalog.configure_course_hole(
+        event.id,
+        %{course_id: course.id, hole_number: 19},
+        actor: admin
+      )
+
+    ratings =
+      Enum.map(holes, fn hole ->
+        %{course_hole_id: hole.id, par: 4, stroke_index: hole.hole_number, distance_m: 300}
+      end) ++
+        [%{course_hole_id: spare_hole.id, par: 5, stroke_index: 1, distance_m: 400}]
+
+    {:ok, profile} =
+      GolfCatalog.configure_tee_rating_profile(
+        event.id,
+        %{
+          tee_set_id: tee_set.id,
+          rating_label: "ExtraSource",
+          course_rating: D.new("72.0"),
+          slope_rating: 113,
+          total_par: 77,
+          hole_ratings: ratings
+        },
+        actor: admin
+      )
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
+
+    assert {:ok, [_snapshot]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+  end
+
+  test "stale Competition Manager cannot snapshot after assignment revocation" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    manager = create_staff_user!()
+    assign_role!(admin, event, manager, :competition_manager)
+    stale_manager = manager
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    tee_set = create_tee_set!(event, admin, course, "White")
+    profile = create_profile!(event, admin, tee_set, holes, "Men")
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
+
+    {:ok, _} =
+      Accounts.revoke_event_staff_role(
+        active_assignment(event, manager, :competition_manager),
+        actor: admin
+      )
+
+    assert {:error, :forbidden} =
+             SnapshotRoundTeeProfiles.run(stale_manager, round.id, [profile.id])
+  end
+
+  test "protected round states reject snapshot mutations" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    tee_set = create_tee_set!(event, admin, course, "White")
+    profile = create_profile!(event, admin, tee_set, holes, "Men")
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
+
+    for state <- [:scoring_closed, :finalized, :cancelled] do
+      set_round_state!(round, state)
+      state_string = Atom.to_string(state)
+
+      assert {:error, {:invalid_round_state, ^state_string}} =
+               SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+    end
+  end
+
+  test "multi-profile snapshot rolls back atomically on failure" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    white = create_tee_set!(event, admin, course, "White")
+    red = create_tee_set!(event, admin, course, "Red")
+    profile_a = create_profile!(event, admin, white, holes, "Men")
+    profile_b = create_profile!(event, admin, red, holes, "Women")
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
+    assert {:ok, [existing]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile_a.id])
+    before = snapshot_values(existing.id)
+
+    install_hole_snapshot_failure_trigger!(round.id, 18)
+
+    try do
+      assert {:error, _} =
+               SnapshotRoundTeeProfiles.run(admin, round.id, [profile_a.id, profile_b.id])
+    after
+      drop_hole_snapshot_failure_trigger!()
+    end
+
+    assert snapshot_values(existing.id) == before
   end
 
   test "PostgreSQL composite and uniqueness constraints are enforced independently" do
@@ -648,15 +829,49 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
     }
   end
 
-  defp active_assignment(event, staff) do
+  defp active_assignment(event, staff, role \\ :event_admin) do
     [[assignment_id]] =
       Repo.query!(
-        "SELECT id::text FROM event_staff_assignments WHERE event_id = $1::uuid AND staff_user_id = $2::uuid AND role = 'event_admin' AND status = 'active'",
-        [Ecto.UUID.dump!(event.id), Ecto.UUID.dump!(staff.id)]
+        "SELECT id::text FROM event_staff_assignments WHERE event_id = $1::uuid AND staff_user_id = $2::uuid AND role = $3 AND status = 'active'",
+        [
+          Ecto.UUID.dump!(event.id),
+          Ecto.UUID.dump!(staff.id),
+          Atom.to_string(role)
+        ]
       ).rows
 
     Accounts.EventStaffAssignment
     |> Ash.get!(assignment_id, authorize?: false)
+  end
+
+  defp install_hole_snapshot_failure_trigger!(_round_id, max_rows) do
+    Repo.query!("""
+    CREATE OR REPLACE FUNCTION gls14_fail_hole_snapshots() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+    DECLARE existing bigint;
+    BEGIN
+      SELECT count(*) INTO existing
+      FROM round_tee_hole_snapshots
+      WHERE round_id = NEW.round_id;
+
+      IF existing >= #{max_rows} THEN
+        RAISE EXCEPTION 'gls14 simulated hole snapshot failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $$;
+    """)
+
+    Repo.query!("""
+    CREATE TRIGGER gls14_fail_hole_snapshots
+    BEFORE INSERT ON round_tee_hole_snapshots
+    FOR EACH ROW EXECUTE FUNCTION gls14_fail_hole_snapshots()
+    """)
+  end
+
+  defp drop_hole_snapshot_failure_trigger! do
+    Repo.query!("DROP TRIGGER IF EXISTS gls14_fail_hole_snapshots ON round_tee_hole_snapshots")
+    Repo.query!("DROP FUNCTION IF EXISTS gls14_fail_hole_snapshots()")
   end
 
   defp assert_constraint_violation(fun, expected_constraint) do

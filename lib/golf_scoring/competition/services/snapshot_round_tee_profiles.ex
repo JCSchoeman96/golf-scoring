@@ -24,10 +24,10 @@ defmodule GolfScoring.Competition.Services.SnapshotRoundTeeProfiles do
            {:ok, round} <- lock_round(round_id),
            :ok <- authorize(actor_id, round.event_id),
            :ok <- round_accepts_snapshot(round),
-           {:ok, round_holes} <- lock_round_holes(round_id),
-           :ok <- validate_route_complete(round_holes),
            {:ok, profile_ids} <- validate_profile_input(tee_rating_profile_ids),
-           {:ok, profiles} <- lock_catalog_profiles(profile_ids, round.course_id),
+           {:ok, round_holes} <- lock_round_holes(round_id),
+           :ok <- validate_route_for_snapshot(profile_ids, round_holes),
+           {:ok, profiles} <- load_profiles_for_snapshot(profile_ids, round.course_id),
            :ok <- validate_profiles_for_route(profiles, round_holes),
            {:ok, snapshots} <- reconcile_snapshots(round, round_holes, profiles, profile_ids) do
         snapshots
@@ -123,7 +123,17 @@ defmodule GolfScoring.Competition.Services.SnapshotRoundTeeProfiles do
   defp validate_route_complete(holes) when length(holes) == @required_hole_count, do: :ok
   defp validate_route_complete(_holes), do: {:error, :round_route_incomplete}
 
-  defp validate_profile_input([]), do: {:error, :no_tee_rating_profiles}
+  defp validate_route_for_snapshot([], _round_holes), do: :ok
+
+  defp validate_route_for_snapshot(_profile_ids, round_holes),
+    do: validate_route_complete(round_holes)
+
+  defp load_profiles_for_snapshot([], _round_course_id), do: {:ok, []}
+
+  defp load_profiles_for_snapshot(profile_ids, round_course_id),
+    do: lock_catalog_profiles(profile_ids, round_course_id)
+
+  defp validate_profile_input([]), do: {:ok, []}
 
   defp validate_profile_input(profile_ids) do
     unique = Enum.uniq(profile_ids)
@@ -246,6 +256,8 @@ defmodule GolfScoring.Competition.Services.SnapshotRoundTeeProfiles do
 
   defp cast_uuid!(id) when is_binary(id), do: Ecto.UUID.cast!(id)
   defp cast_uuid!(id), do: id
+
+  defp validate_profiles_for_route([], _round_holes), do: :ok
 
   defp validate_profiles_for_route(profiles, round_holes) do
     Enum.reduce_while(profiles, :ok, fn profile, :ok ->

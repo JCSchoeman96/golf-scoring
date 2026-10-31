@@ -10,6 +10,7 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
   alias GolfScoring.Competition.Services.ConfigureRoundLayout
   alias GolfScoring.Competition.Services.SnapshotRoundTeeProfiles
   alias GolfScoring.Repo
+  alias GolfScoringWeb.Admin.InputParsing
 
   @setup_roles [:event_admin, :competition_manager]
 
@@ -41,55 +42,82 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
   end
 
   @impl true
-  def handle_event("save_route", %{"route" => %{"course_hole_ids" => raw_ids}}, socket) do
+  def handle_event("save_route", %{"route" => route_params}, socket) do
     staff = Repo.get!(StaffUser, socket.assigns.current_staff_user.id)
     round = socket.assigns.round
 
-    course_hole_ids =
-      raw_ids
-      |> String.split(",", trim: true)
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.map(&Ecto.UUID.cast!/1)
+    with {:ok, course_hole_ids} <- parse_route_selections(route_params) do
+      case ConfigureRoundLayout.run(staff, round.id, course_hole_ids) do
+        {:ok, route} ->
+          {:noreply,
+           socket
+           |> put_flash(:info, "Round route saved (#{length(route)} holes).")
+           |> refresh_round_state(round)}
 
-    case ConfigureRoundLayout.run(staff, round.id, course_hole_ids) do
-      {:ok, route} ->
+        {:error, :forbidden} ->
+          {:noreply,
+           put_flash(socket, :error, "You are not allowed to configure this Round route.")}
+
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Route save failed: #{format_error(reason)}")}
+      end
+    else
+      {:error, :invalid_input} ->
         {:noreply,
-         socket
-         |> put_flash(:info, "Round route saved (#{length(route)} holes).")
-         |> refresh_round_state(round)}
-
-      {:error, :forbidden} ->
-        {:noreply,
-         put_flash(socket, :error, "You are not allowed to configure this Round route.")}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Route save failed: #{inspect(reason)}")}
+         put_flash(socket, :error, "Choose a valid course hole for every play position.")}
     end
   end
 
   @impl true
-  def handle_event("snapshot_tees", %{"snapshot" => %{"profile_ids" => profile_ids}}, socket) do
+  def handle_event("snapshot_tees", %{"snapshot" => params}, socket) do
     staff = Repo.get!(StaffUser, socket.assigns.current_staff_user.id)
     round = socket.assigns.round
 
-    selected =
-      profile_ids
-      |> List.wrap()
-      |> Enum.reject(&(&1 in [nil, ""]))
-      |> Enum.map(&Ecto.UUID.cast!/1)
+    profile_ids = Map.get(params, "profile_ids", []) |> List.wrap()
 
-    case SnapshotRoundTeeProfiles.run(staff, round.id, selected) do
-      {:ok, snapshots} ->
+    with {:ok, selected} <- InputParsing.parse_uuids(profile_ids) do
+      case SnapshotRoundTeeProfiles.run(staff, round.id, selected) do
+        {:ok, snapshots} ->
+          message =
+            if snapshots == [] do
+              "Cleared all tee profile snapshots."
+            else
+              "Snapshotted #{length(snapshots)} tee profile(s)."
+            end
+
+          {:noreply,
+           socket
+           |> put_flash(:info, message)
+           |> refresh_round_state(round)}
+
+        {:error, :forbidden} ->
+          {:noreply, put_flash(socket, :error, "You are not allowed to snapshot tee profiles.")}
+
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Snapshot failed: #{format_error(reason)}")}
+      end
+    else
+      {:error, :invalid_input} ->
+        {:noreply, put_flash(socket, :error, "Selected tee profiles must be valid.")}
+    end
+  end
+
+  def handle_event("clear_snapshots", _params, socket) do
+    staff = Repo.get!(StaffUser, socket.assigns.current_staff_user.id)
+    round = socket.assigns.round
+
+    case SnapshotRoundTeeProfiles.run(staff, round.id, []) do
+      {:ok, []} ->
         {:noreply,
          socket
-         |> put_flash(:info, "Snapshotted #{length(snapshots)} tee profile(s).")
+         |> put_flash(:info, "Cleared all tee profile snapshots.")
          |> refresh_round_state(round)}
 
       {:error, :forbidden} ->
-        {:noreply, put_flash(socket, :error, "You are not allowed to snapshot tee profiles.")}
+        {:noreply, put_flash(socket, :error, "You are not allowed to clear tee snapshots.")}
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Snapshot failed: #{inspect(reason)}")}
+        {:noreply, put_flash(socket, :error, "Clear snapshots failed: #{format_error(reason)}")}
     end
   end
 
@@ -115,13 +143,19 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
               </li>
             </ol>
             <.form id="round-route-form" for={%{}} phx-submit="save_route">
-              <.input
-                id="round-route-input"
-                name="route[course_hole_ids]"
-                type="text"
-                label="Course hole IDs (comma-separated, 18 required)"
-                value={@route_input}
-              />
+              <div id="round-route-selectors" class="grid gap-3 sm:grid-cols-2">
+                <%= for play_order <- 1..18 do %>
+                  <.input
+                    id={"round-route-hole-#{play_order}"}
+                    name={"route[hole_#{play_order}]"}
+                    type="select"
+                    label={"Play #{play_order}"}
+                    value={Map.get(@route_selections, play_order, "")}
+                    options={@course_hole_options}
+                    prompt="Select course hole"
+                  />
+                <% end %>
+              </div>
               <button id="round-route-save-button" type="submit" class="btn btn-primary mt-3">
                 Save route
               </button>
@@ -153,6 +187,14 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
                 Snapshot selected profiles
               </button>
             </.form>
+            <button
+              id="round-clear-snapshots-button"
+              type="button"
+              class="btn btn-outline mt-3"
+              phx-click="clear_snapshots"
+            >
+              Clear all snapshots
+            </button>
           </div>
         <% end %>
       </section>
@@ -173,10 +215,15 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
     snapshots = list_snapshots(round.id)
     available = list_available_profiles(round.course_id)
 
-    route_input =
+    course_hole_options =
+      Enum.map(course_holes, fn hole ->
+        {"Hole #{hole.hole_number}", hole.id}
+      end)
+
+    route_selections =
       round_holes
       |> Enum.sort_by(& &1.play_order)
-      |> Enum.map_join(",", & &1.course_hole_id)
+      |> Map.new(fn hole -> {hole.play_order, hole.course_hole_id} end)
 
     selected_profile_ids = Enum.map(snapshots, & &1.source_tee_rating_profile_id)
 
@@ -184,11 +231,32 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
     |> assign(:round, Repo.get!(Round, round.id))
     |> assign(:round_holes, round_holes)
     |> assign(:course_holes, course_holes)
+    |> assign(:course_hole_options, course_hole_options)
+    |> assign(:route_selections, route_selections)
     |> assign(:snapshots, snapshots)
     |> assign(:available_profiles, available)
     |> assign(:selected_profile_ids, selected_profile_ids)
-    |> assign(:route_input, route_input)
   end
+
+  defp parse_route_selections(route_params) do
+    1..18
+    |> Enum.reduce_while({:ok, []}, fn play_order, {:ok, acc} ->
+      key = "hole_#{play_order}"
+
+      case InputParsing.parse_uuid(Map.get(route_params, key)) do
+        {:ok, course_hole_id} -> {:cont, {:ok, [course_hole_id | acc]}}
+        {:error, _} -> {:halt, {:error, :invalid_input}}
+      end
+    end)
+    |> case do
+      {:ok, ids} -> {:ok, Enum.reverse(ids)}
+      error -> error
+    end
+  end
+
+  defp format_error({:invalid_round_state, state}), do: "invalid round state #{state}"
+  defp format_error(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp format_error(reason), do: inspect(reason)
 
   defp list_round_holes(round_id) do
     Repo.query!(
