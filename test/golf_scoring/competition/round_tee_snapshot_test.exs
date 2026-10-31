@@ -261,6 +261,47 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
     assert snapshot_values(snapshot.id) == before
   end
 
+  test "stale Event Admin cannot snapshot after assignment revocation" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    replacement = create_event_admin!(event)
+    stale_admin = admin
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    tee_set = create_tee_set!(event, admin, course, "White")
+    profile = create_profile!(event, admin, tee_set, holes, "Men")
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
+    assert {:ok, [snapshot]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+    before = snapshot_values(snapshot.id)
+
+    {:ok, _} =
+      Accounts.revoke_event_staff_role(
+        active_assignment(event, admin),
+        actor: replacement
+      )
+
+    assert {:error, :forbidden} = SnapshotRoundTeeProfiles.run(stale_admin, round.id, [profile.id])
+    assert snapshot_values(snapshot.id) == before
+  end
+
+  test "cross-course tee profile is rejected" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course_a = create_course!(event, admin, "A")
+    course_b = create_course!(event, admin, "B")
+    holes_a = create_eighteen_holes!(event, admin, course_a)
+    tee_set_b = create_tee_set!(event, admin, course_b, "Red")
+    profile_b = create_profile!(event, admin, tee_set_b, create_eighteen_holes!(event, admin, course_b), "Women")
+
+    {:ok, round} = Competition.create_round(event.id, course_a.id, actor: admin)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes_a, & &1.id))
+
+    assert {:error, :cross_course_tee_profile} =
+             SnapshotRoundTeeProfiles.run(admin, round.id, [profile_b.id])
+  end
+
   test "PostgreSQL composite and uniqueness constraints are enforced independently" do
     fixture = snapshot_constraint_fixture!()
 
@@ -595,6 +636,17 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
       profile_a: profile_a,
       profile_b: profile_b
     }
+  end
+
+  defp active_assignment(event, staff) do
+    [[assignment_id]] =
+      Repo.query!(
+        "SELECT id::text FROM event_staff_assignments WHERE event_id = $1::uuid AND staff_user_id = $2::uuid AND role = 'event_admin' AND status = 'active'",
+        [Ecto.UUID.dump!(event.id), Ecto.UUID.dump!(staff.id)]
+      ).rows
+
+    Accounts.EventStaffAssignment
+    |> Ash.get!(assignment_id, authorize?: false)
   end
 
   defp assert_constraint_violation(fun, expected_constraint) do
