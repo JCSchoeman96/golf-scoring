@@ -3,6 +3,10 @@ defmodule GolfScoring.Competition do
 
   use Ash.Domain
 
+  alias GolfScoring.Competition.Services.ConfigureRoundCompetition
+  alias GolfScoring.Competition.Services.CreateCompetitionSide
+  alias GolfScoring.Competition.Services.SetSideMembership
+
   resources do
     resource GolfScoring.Competition.Event do
       define :cancel_event, action: :cancel_event
@@ -56,22 +60,11 @@ defmodule GolfScoring.Competition do
   end
 
   def configure_round_competition(actor, event_id, round_id, attrs) do
-    GolfScoring.Competition.Services.ConfigureRoundCompetition.run(
-      actor,
-      event_id,
-      round_id,
-      attrs
-    )
+    ConfigureRoundCompetition.run(actor, event_id, round_id, attrs)
   end
 
   def create_competition_side(actor, event_id, round_id, round_competition_id, formation) do
-    GolfScoring.Competition.Services.CreateCompetitionSide.run(
-      actor,
-      event_id,
-      round_id,
-      round_competition_id,
-      formation
-    )
+    CreateCompetitionSide.run(actor, event_id, round_id, round_competition_id, formation)
   end
 
   def set_side_membership(
@@ -82,7 +75,7 @@ defmodule GolfScoring.Competition do
         competition_side_id,
         round_entry_ids
       ) do
-    GolfScoring.Competition.Services.SetSideMembership.run(
+    SetSideMembership.run(
       actor,
       event_id,
       round_id,

@@ -140,41 +140,58 @@ defmodule GolfScoring.Competition.Services.SetSideMembership do
     if round_entry_ids == [] do
       {:ok, []}
     else
-      dumped_ids = Enum.map(round_entry_ids, &Ecto.UUID.dump!/1)
-
-      rows =
-        Repo.query!(
-          """
-          SELECT id::text, event_id::text, round_id::text,
-                 registration_status, participation_status
-          FROM round_entries
-          WHERE round_id = $1::uuid
-            AND id = ANY($2::uuid[])
-          ORDER BY id
-          FOR UPDATE
-          """,
-          [Ecto.UUID.dump!(round_id), dumped_ids]
-        ).rows
-
-      if length(rows) != length(round_entry_ids) do
-        {:error, :round_entry_not_found}
-      else
-        entries =
-          Enum.map(rows, fn [id, eid, rid, reg, part] ->
-            %{
-              id: Ecto.UUID.cast!(id),
-              event_id: Ecto.UUID.cast!(eid),
-              round_id: Ecto.UUID.cast!(rid),
-              registration_status: String.to_existing_atom(reg),
-              participation_status: String.to_existing_atom(part)
-            }
-          end)
-
-        if Enum.all?(entries, &(&1.event_id == event_id)),
-          do: {:ok, entries},
-          else: {:error, :event_mismatch}
-      end
+      round_entry_ids
+      |> fetch_locked_round_entry_rows(round_id)
+      |> validate_locked_row_count(round_entry_ids)
+      |> validate_locked_entries_event(event_id)
     end
+  end
+
+  defp fetch_locked_round_entry_rows(round_entry_ids, round_id) do
+    dumped_ids = Enum.map(round_entry_ids, &Ecto.UUID.dump!/1)
+
+    Repo.query!(
+      """
+      SELECT id::text, event_id::text, round_id::text,
+             registration_status, participation_status
+      FROM round_entries
+      WHERE round_id = $1::uuid
+        AND id = ANY($2::uuid[])
+      ORDER BY id
+      FOR UPDATE
+      """,
+      [Ecto.UUID.dump!(round_id), dumped_ids]
+    ).rows
+  end
+
+  defp validate_locked_row_count(rows, round_entry_ids) do
+    if length(rows) == length(round_entry_ids) do
+      {:ok, map_locked_round_entries(rows)}
+    else
+      {:error, :round_entry_not_found}
+    end
+  end
+
+  defp validate_locked_entries_event({:error, _} = error, _event_id), do: error
+
+  defp validate_locked_entries_event({:ok, entries}, event_id) do
+    if Enum.all?(entries, &(&1.event_id == event_id)) do
+      {:ok, entries}
+    else
+      {:error, :event_mismatch}
+    end
+  end
+
+  defp map_locked_round_entries(rows) do
+    Enum.map(rows, fn [id, eid, rid, reg, part] ->
+      %{
+        id: Ecto.UUID.cast!(id),
+        event_id: Ecto.UUID.cast!(eid),
+        round_id: Ecto.UUID.cast!(rid),
+        registration_status: String.to_existing_atom(reg),
+        participation_status: String.to_existing_atom(part)
+      }
+    end)
   end
 
   defp validate_scope(entries, round_id) do
@@ -194,26 +211,29 @@ defmodule GolfScoring.Competition.Services.SetSideMembership do
   end
 
   defp remove_existing_memberships(round_competition_id, round_entry_ids) do
-    for entry_id <- round_entry_ids do
-      memberships =
-        CompetitionSideMembership
-        |> Ash.Query.filter(
-          round_competition_id == ^round_competition_id and round_entry_id == ^entry_id
-        )
-        |> Ash.read!(authorize?: false)
-
-      for membership <- memberships do
-        case Ash.destroy(membership, action: :destroy_internal, authorize?: false) do
-          :ok -> :ok
-          {:ok, _} -> :ok
-          {:error, error} -> throw({:error, error})
-        end
+    Enum.reduce_while(round_entry_ids, :ok, fn entry_id, :ok ->
+      case destroy_memberships_for_entry(round_competition_id, entry_id) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
       end
-    end
+    end)
+  end
 
-    :ok
-  catch
-    {:error, reason} -> {:error, reason}
+  defp destroy_memberships_for_entry(round_competition_id, entry_id) do
+    memberships =
+      CompetitionSideMembership
+      |> Ash.Query.filter(
+        round_competition_id == ^round_competition_id and round_entry_id == ^entry_id
+      )
+      |> Ash.read!(authorize?: false)
+
+    Enum.reduce_while(memberships, :ok, fn membership, :ok ->
+      case Ash.destroy(membership, action: :destroy_internal, authorize?: false) do
+        :ok -> {:cont, :ok}
+        {:ok, _} -> {:cont, :ok}
+        {:error, error} -> {:halt, {:error, error}}
+      end
+    end)
   end
 
   defp replace_side_memberships(round, competition, side, round_entry_ids) do

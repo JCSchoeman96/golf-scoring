@@ -8,14 +8,14 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
   alias GolfScoring.Accounts.Checks.ActiveEventRole
   alias GolfScoring.Accounts.StaffUser
   alias GolfScoring.Competition
-  alias GolfScoring.Competition.PlayingGroup
-  alias GolfScoring.Competition.PlayingGroupReadiness
-  alias GolfScoring.Competition.Round
-  alias GolfScoring.Competition.RoundHole
   alias GolfScoring.Competition.CompetitionSide
   alias GolfScoring.Competition.CompetitionSideMembership
   alias GolfScoring.Competition.CompetitionSideResult
+  alias GolfScoring.Competition.PlayingGroup
+  alias GolfScoring.Competition.PlayingGroupReadiness
+  alias GolfScoring.Competition.Round
   alias GolfScoring.Competition.RoundCompetition
+  alias GolfScoring.Competition.RoundHole
   alias GolfScoring.Competition.Services.AssignEntryToGroup
   alias GolfScoring.Competition.Services.AssignPlayingGroupStart
   alias GolfScoring.Competition.Services.ConfigureRoundCompetition
@@ -85,36 +85,37 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
     event_id = socket.assigns.event_id
     competition = socket.assigns.round_competition
 
-    with {:ok, side_formation} <- parse_side_formation(formation) do
-      case CreateCompetitionSide.run(
-             staff,
-             event_id,
-             round.id,
-             competition.id,
-             side_formation
-           ) do
-        {:ok, _} ->
-          {:noreply,
-           socket
-           |> put_flash(:info, "Competition side created.")
-           |> refresh_assignments(round)}
+    case parse_side_formation(formation) do
+      {:ok, side_formation} ->
+        case CreateCompetitionSide.run(
+               staff,
+               event_id,
+               round.id,
+               competition.id,
+               side_formation
+             ) do
+          {:ok, _} ->
+            {:noreply,
+             socket
+             |> put_flash(:info, "Competition side created.")
+             |> refresh_assignments(round)}
 
-        {:error, :forbidden} ->
-          {:noreply,
-           put_flash(socket, :error, "You are not allowed to create competition sides.")}
+          {:error, :forbidden} ->
+            {:noreply,
+             put_flash(socket, :error, "You are not allowed to create competition sides.")}
 
-        {:error, {:invalid_round_state, state}} ->
-          {:noreply,
-           put_flash(
-             socket,
-             :error,
-             "Competition side setup is not allowed while the Round is #{state}."
-           )}
+          {:error, {:invalid_round_state, state}} ->
+            {:noreply,
+             put_flash(
+               socket,
+               :error,
+               "Competition side setup is not allowed while the Round is #{state}."
+             )}
 
-        {:error, _} ->
-          {:noreply, put_flash(socket, :error, "Could not create competition side.")}
-      end
-    else
+          {:error, _} ->
+            {:noreply, put_flash(socket, :error, "Could not create competition side.")}
+        end
+
       {:error, :invalid_input} ->
         {:noreply, put_flash(socket, :error, "Side formation must be partnership or solo.")}
     end

@@ -4,9 +4,9 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
   alias Ash.Changeset
   alias GolfScoring.Accounts.Checks.ActiveEventRole
   alias GolfScoring.Accounts.EventAuthorityLock
+  alias GolfScoring.Competition.CompetitionSideMembership
   alias GolfScoring.Competition.Player
   alias GolfScoring.Competition.RoundEntry
-  alias GolfScoring.Competition.CompetitionSideMembership
   alias GolfScoring.Repo
 
   @manager_roles [:event_admin, :competition_manager]
@@ -255,9 +255,8 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
       |> Enum.uniq()
       |> Enum.sort_by(&Ecto.UUID.dump!/1)
 
-    with :ok <- lock_round_competitions(competition_ids),
-         :ok <- lock_competition_sides(side_ids) do
-      :ok
+    with :ok <- lock_round_competitions(competition_ids) do
+      lock_competition_sides(side_ids)
     end
   end
 

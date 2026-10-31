@@ -441,15 +441,20 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
     partner_a = add_entry!(%{event: event, round: round, admin: admin})
     partner_b = add_entry!(%{event: event, round: round, admin: admin})
 
+    player_ids = [entry.player_id, partner_a.player_id, partner_b.player_id]
+
     %{
       event_id: event.id,
       round_id: round.id,
+      course_id: course.id,
       competition_id: competition.id,
       side_a_id: side_a.id,
       side_b_id: side_b.id,
       entry_id: entry.id,
       partner_a_id: partner_a.id,
       partner_b_id: partner_b.id,
+      staff_id: admin.id,
+      player_ids: player_ids,
       admin: admin
     }
   end
@@ -458,6 +463,8 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
     Sandbox.unboxed_run(Repo, fn ->
       dumped_round = Ecto.UUID.dump!(fixture.round_id)
       dumped_event = Ecto.UUID.dump!(fixture.event_id)
+      dumped_course = Ecto.UUID.dump!(fixture.course_id)
+      dumped_staff = Ecto.UUID.dump!(fixture.staff_id)
 
       Repo.query!("DELETE FROM competition_side_memberships WHERE round_id = $1::uuid", [
         dumped_round
@@ -474,8 +481,23 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
       Repo.query!("DELETE FROM round_competitions WHERE round_id = $1::uuid", [dumped_round])
       Repo.query!("DELETE FROM round_entries WHERE round_id = $1::uuid", [dumped_round])
       Repo.query!("DELETE FROM rounds WHERE id = $1::uuid", [dumped_round])
+
+      for player_id <- fixture.player_ids do
+        Repo.query!("DELETE FROM players WHERE id = $1::uuid", [Ecto.UUID.dump!(player_id)])
+      end
+
+      Repo.query!("DELETE FROM course_holes WHERE course_id = $1::uuid", [dumped_course])
+      Repo.query!("DELETE FROM tee_sets WHERE course_id = $1::uuid", [dumped_course])
+      Repo.query!("DELETE FROM courses WHERE id = $1::uuid", [dumped_course])
+
+      Repo.query!(
+        "DELETE FROM audit_events WHERE target_id = $1::uuid OR actor_staff_user_id = $2::uuid OR target_id = $2::uuid",
+        [dumped_event, dumped_staff]
+      )
+
       Repo.query!("DELETE FROM event_staff_assignments WHERE event_id = $1::uuid", [dumped_event])
       Repo.query!("DELETE FROM events WHERE id = $1::uuid", [dumped_event])
+      Repo.query!("DELETE FROM staff_users WHERE id = $1::uuid", [dumped_staff])
     end)
   end
 
