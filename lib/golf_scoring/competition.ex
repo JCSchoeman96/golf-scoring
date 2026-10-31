@@ -21,5 +21,8 @@ defmodule GolfScoring.Competition do
     end
 
     resource GolfScoring.Competition.RoundHole
+
+    resource GolfScoring.Competition.RoundTeeProfileSnapshot
+    resource GolfScoring.Competition.RoundTeeHoleSnapshot
   end
 end

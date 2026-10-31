@@ -63,6 +63,8 @@ defmodule GolfScoringWeb.Router do
 
     ash_authentication_live_session :admin_staff do
       live "/", GolfScoringWeb.Admin.DashboardLive, :index
+      live "/events/:event_id/course-setup", GolfScoringWeb.Admin.CourseSetupLive, :index
+      live "/events/:event_id/rounds/:round_id/setup", GolfScoringWeb.Admin.RoundSetupLive, :index
     end
   end
 
