@@ -515,6 +515,101 @@ defmodule GolfScoring.Competition.PlayingGroupTest do
              AssignEntryToGroup.run(admin, event.id, round.id, marked.id, group.id)
   end
 
+  test "active group role blocks cross-group move; historical roles do not" do
+    %{event: event, round: round, admin: admin} = setup_round!()
+    {:ok, group_a} = Competition.create_playing_group(event.id, round.id, actor: admin)
+    {:ok, group_b} = Competition.create_playing_group(event.id, round.id, actor: admin)
+
+    scorer_entry = add_entry!(event, round, admin)
+    verifier_entry = add_entry!(event, round, admin)
+    spare_entry = add_entry!(event, round, admin)
+
+    {:ok, _} = AssignEntryToGroup.run(admin, event.id, round.id, scorer_entry.id, group_a.id)
+    {:ok, _} = AssignEntryToGroup.run(admin, event.id, round.id, verifier_entry.id, group_a.id)
+    {:ok, _} = AssignEntryToGroup.run(admin, event.id, round.id, spare_entry.id, group_a.id)
+
+    assert {:ok, _} =
+             Competition.assign_primary_scorer(
+               admin,
+               event.id,
+               round.id,
+               group_a.id,
+               scorer_entry.id
+             )
+
+    assert {:ok, _} =
+             Competition.assign_designated_verifier(
+               admin,
+               event.id,
+               round.id,
+               group_a.id,
+               verifier_entry.id
+             )
+
+    assert {:error, :active_group_role_assignment_blocks_group_move} =
+             AssignEntryToGroup.run(admin, event.id, round.id, scorer_entry.id, group_b.id)
+
+    assert {:error, :active_group_role_assignment_blocks_group_move} =
+             AssignEntryToGroup.run(admin, event.id, round.id, verifier_entry.id, group_b.id)
+
+    assert {:ok, _} =
+             Competition.handover_primary_scorer(
+               admin,
+               event.id,
+               round.id,
+               group_a.id,
+               spare_entry.id
+             )
+
+    assert {:ok, _} =
+             Competition.revoke_designated_verifier(
+               admin,
+               event.id,
+               round.id,
+               group_a.id,
+               "release verifier"
+             )
+
+    assert {:ok, _} =
+             Competition.revoke_primary_scorer(
+               admin,
+               event.id,
+               round.id,
+               group_a.id,
+               "release scorer after handover"
+             )
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(admin, event.id, round.id, spare_entry.id, group_b.id)
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(admin, event.id, round.id, scorer_entry.id, group_b.id)
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(admin, event.id, round.id, verifier_entry.id, group_b.id)
+  end
+
+  test "same-group assign_entry_to_group remains idempotent for role holders" do
+    %{event: event, round: round, admin: admin} = setup_round!()
+    {:ok, group} = Competition.create_playing_group(event.id, round.id, actor: admin)
+    entry = add_entry!(event, round, admin)
+    {:ok, assigned} = AssignEntryToGroup.run(admin, event.id, round.id, entry.id, group.id)
+
+    assert {:ok, _} =
+             Competition.assign_primary_scorer(
+               admin,
+               event.id,
+               round.id,
+               group.id,
+               assigned.id
+             )
+
+    assert {:ok, same} =
+             AssignEntryToGroup.run(admin, event.id, round.id, assigned.id, group.id)
+
+    assert same.id == assigned.id
+  end
+
   @tag :real_concurrency
   test "independent PostgreSQL backends enforce group capacity under concurrency" do
     fixture_key = System.unique_integer([:positive])

@@ -1,6 +1,8 @@
 defmodule GolfScoring.Competition.RoundEntryTest do
   use ExUnit.Case, async: false
 
+  require Ash.Query
+
   alias Ash.Resource.Info
   alias Ecto.Adapters.SQL.Sandbox
   alias GolfScoring.Accounts
@@ -10,6 +12,7 @@ defmodule GolfScoring.Competition.RoundEntryTest do
   alias GolfScoring.Competition.Player
   alias GolfScoring.Competition.Round
   alias GolfScoring.Competition.RoundEntry
+  alias GolfScoring.Competition.GroupRoleAssignment
   alias GolfScoring.Competition.Services.AssignEntryToGroup
   alias GolfScoring.Competition.Services.ReplaceRoundEntry
   alias GolfScoring.Competition.StartingParticipant
@@ -573,6 +576,123 @@ defmodule GolfScoring.Competition.RoundEntryTest do
 
     assert is_nil(marked.playing_group_id)
     assert is_nil(new_entry.playing_group_id)
+  end
+
+  test "active group role blocks registration transitions and replacement" do
+    %{event: event, round: round, admin: admin, player: player} = setup_round!()
+    manager = create_staff_user!()
+    assign_role!(admin, event, manager, :competition_manager)
+    registration = create_staff_user!()
+    assign_role!(admin, event, registration, :registration_staff)
+    {:ok, group} = Competition.create_playing_group(event.id, round.id, actor: admin)
+
+    assert {:ok, original} =
+             Competition.add_round_entry(event.id, round.id, player.id, actor: admin)
+
+    assert {:ok, grouped} =
+             AssignEntryToGroup.run(admin, event.id, round.id, original.id, group.id)
+
+    assert {:ok, _} =
+             Competition.assign_primary_scorer(
+               admin,
+               event.id,
+               round.id,
+               group.id,
+               grouped.id
+             )
+
+    assert {:error, %Ash.Error.Invalid{}} =
+             Competition.mark_no_show(grouped, actor: registration)
+
+    assert {:error, %Ash.Error.Invalid{}} =
+             Competition.withdraw_before_start(grouped, actor: registration)
+
+    replacement_player = create_player!()
+
+    assert {:error, :active_group_role_assignment_blocks_replacement} =
+             ReplaceRoundEntry.run(
+               manager,
+               event.id,
+               round.id,
+               grouped.id,
+               replacement_player.id
+             )
+
+    assert entry_registration(grouped.id) == "expected"
+
+    assert {:ok, _} =
+             Competition.revoke_primary_scorer(
+               admin,
+               event.id,
+               round.id,
+               group.id,
+               "clear for replacement"
+             )
+
+    assert {:ok, _} = Competition.mark_no_show(grouped, actor: registration)
+    assert entry_registration(grouped.id) == "no_show"
+
+    replacement_player = create_player!()
+
+    assert {:ok, fresh_entry} =
+             Competition.add_round_entry(event.id, round.id, replacement_player.id, actor: admin)
+
+    assert {:ok, _} =
+             AssignEntryToGroup.run(admin, event.id, round.id, fresh_entry.id, group.id)
+
+    assert {:ok, _} =
+             Competition.withdraw_before_start(fresh_entry, actor: registration)
+
+    assert entry_registration(fresh_entry.id) == "withdrawn_before_start"
+  end
+
+  test "replacement after role revoke does not inherit group role authority" do
+    %{event: event, round: round, admin: admin, player: player} = setup_round!()
+    manager = create_staff_user!()
+    assign_role!(admin, event, manager, :competition_manager)
+    {:ok, group} = Competition.create_playing_group(event.id, round.id, actor: admin)
+
+    assert {:ok, original} =
+             Competition.add_round_entry(event.id, round.id, player.id, actor: admin)
+
+    assert {:ok, grouped} =
+             AssignEntryToGroup.run(admin, event.id, round.id, original.id, group.id)
+
+    assert {:ok, _} =
+             Competition.assign_primary_scorer(
+               admin,
+               event.id,
+               round.id,
+               group.id,
+               grouped.id
+             )
+
+    assert {:ok, _} =
+             Competition.revoke_primary_scorer(
+               admin,
+               event.id,
+               round.id,
+               group.id,
+               "clear for replacement"
+             )
+
+    successor_player = create_player!()
+
+    assert {:ok, %{replacement: successor}} =
+             ReplaceRoundEntry.run(
+               manager,
+               event.id,
+               round.id,
+               grouped.id,
+               successor_player.id
+             )
+
+    role_rows =
+      GroupRoleAssignment
+      |> Ash.Query.filter(round_entry_id == ^successor.id)
+      |> Ash.read!(authorize?: false)
+
+    assert role_rows == []
   end
 
   test "full four-current-starter group replacement keeps four current starters" do

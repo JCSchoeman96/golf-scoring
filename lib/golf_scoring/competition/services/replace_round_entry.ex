@@ -5,6 +5,7 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
   alias GolfScoring.Accounts.Checks.ActiveEventRole
   alias GolfScoring.Accounts.EventAuthorityLock
   alias GolfScoring.Competition.CompetitionSideMembership
+  alias GolfScoring.Competition.GroupRoleAssignmentGuard
   alias GolfScoring.Competition.Player
   alias GolfScoring.Competition.RoundEntry
   alias GolfScoring.Repo
@@ -31,6 +32,7 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
            {:ok, original} <- lock_round_entry(original_entry_id),
            :ok <- original_belongs_to_round(original, round_id, event_id),
            :ok <- verify_group_unchanged(original, playing_group_id),
+           :ok <- GroupRoleAssignmentGuard.reject_active_role_replacement(original.id),
            :ok <- validate_original(original, replacement_player_id),
            :ok <- replacement_player_exists(replacement_player_id),
            :ok <- replacement_available(round_id, replacement_player_id),

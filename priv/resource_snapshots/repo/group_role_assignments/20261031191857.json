@@ -1,0 +1,439 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"gen_random_uuid()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "role",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"active\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "state",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "assignment_version",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "updated_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "group_role_assignments_round_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "rounds"
+      },
+      "scale": null,
+      "size": null,
+      "source": "round_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": {
+          "round_id": "round_id"
+        },
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "group_role_assignments_playing_group_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "playing_groups"
+      },
+      "scale": null,
+      "size": null,
+      "source": "playing_group_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": {
+          "round_id": "round_id"
+        },
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "group_role_assignments_round_entry_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "round_entries"
+      },
+      "scale": null,
+      "size": null,
+      "source": "round_entry_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "role"
+      ],
+      "base_filter": null,
+      "check": "role IN ('primary_scorer', 'designated_verifier')",
+      "name": "group_role_assignments_role_must_be_valid"
+    },
+    {
+      "attribute": [
+        "state"
+      ],
+      "base_filter": null,
+      "check": "state IN ('active', 'handed_over', 'revoked')",
+      "name": "group_role_assignments_state_must_be_valid"
+    },
+    {
+      "attribute": [
+        "assignment_version"
+      ],
+      "base_filter": null,
+      "check": "assignment_version > 0",
+      "name": "group_role_assignments_version_must_be_positive"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "round_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "round_id"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": null,
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": false,
+      "using": null,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "playing_group_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "playing_group_id"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": null,
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": false,
+      "using": null,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "round_entry_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "round_entry_id"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": null,
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": false,
+      "using": null,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "playing_group_id",
+        "role"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "playing_group_id"
+        },
+        {
+          "type": "atom",
+          "value": "role"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": "group_role_assignments_one_active_per_group_role_index",
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": true,
+      "using": null,
+      "where": "state = 'active'"
+    },
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "playing_group_id",
+        "round_entry_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "playing_group_id"
+        },
+        {
+          "type": "atom",
+          "value": "round_entry_id"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": "group_role_assignments_one_active_entry_per_group_index",
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": true,
+      "using": null,
+      "where": "state = 'active'"
+    },
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "playing_group_id",
+        "role",
+        "assignment_version"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "playing_group_id"
+        },
+        {
+          "type": "atom",
+          "value": "role"
+        },
+        {
+          "type": "atom",
+          "value": "assignment_version"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": "group_role_assignments_unique_revision_index",
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": true,
+      "using": null,
+      "where": null
+    }
+  ],
+  "custom_statements": [],
+  "has_create_action": true,
+  "hash": "3F72BAF6F1441BE32F474C35DCF9BDCC8CB22044E82626D5B6D76B9840CED0F8",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "group_role_assignments_one_active_entry_per_group_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "playing_group_id"
+        },
+        {
+          "type": "atom",
+          "value": "round_entry_id"
+        }
+      ],
+      "name": "unique_active_entry_per_group",
+      "nils_distinct?": true,
+      "where": "state = 'active'"
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "group_role_assignments_one_active_per_group_role_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "playing_group_id"
+        },
+        {
+          "type": "atom",
+          "value": "role"
+        }
+      ],
+      "name": "unique_active_per_group_role",
+      "nils_distinct?": true,
+      "where": "state = 'active'"
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "group_role_assignments_unique_revision_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "playing_group_id"
+        },
+        {
+          "type": "atom",
+          "value": "role"
+        },
+        {
+          "type": "atom",
+          "value": "assignment_version"
+        }
+      ],
+      "name": "unique_revision_per_group_role",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.GolfScoring.Repo",
+  "schema": null,
+  "table": "group_role_assignments",
+  "temporal": null
+}
