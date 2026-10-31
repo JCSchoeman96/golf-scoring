@@ -1,9 +1,12 @@
 defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
   @moduledoc false
 
+  require Ash.Query
+
   alias Ash.Changeset
   alias GolfScoring.Accounts.Checks.ActiveEventRole
   alias GolfScoring.Accounts.EventAuthorityLock
+  alias GolfScoring.Competition.CompetitionSideMembership
   alias GolfScoring.Competition.PlayingGroupReadiness
   alias GolfScoring.Competition.RoundEntry
   alias GolfScoring.Competition.StartingParticipant
@@ -29,6 +32,7 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
            {:ok, entry} <- lock_round_entry(round_entry_id),
            :ok <- entry_belongs_to_round(entry, round_id, event_id),
            :ok <- validate_start_eligible(entry),
+           :ok <- validate_competition_side_group_cohesion(round_id, entry.id, playing_group_id),
            :ok <- validate_capacity(group.id, entry),
            {:ok, updated} <- assign_entry(entry, group.id) do
         updated
@@ -167,6 +171,131 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
     else
       :ok
     end
+  end
+
+  defp validate_competition_side_group_cohesion(round_id, entry_id, target_group_id) do
+    side_ids = competition_side_ids_for_entry(entry_id, round_id)
+
+    if side_ids == [] do
+      :ok
+    else
+      with :ok <- lock_competition_sides(side_ids, round_id),
+           :ok <- lock_current_starter_entries_on_sides(side_ids, round_id),
+           :ok <- verify_side_group_cohesion(side_ids, round_id, entry_id, target_group_id) do
+        :ok
+      end
+    end
+  end
+
+  defp competition_side_ids_for_entry(entry_id, round_id) do
+    CompetitionSideMembership
+    |> Ash.Query.filter(round_entry_id == ^entry_id and round_id == ^round_id)
+    |> Ash.read!(authorize?: false)
+    |> Enum.map(& &1.competition_side_id)
+    |> Enum.uniq()
+    |> Enum.sort_by(&Ecto.UUID.dump!/1)
+  end
+
+  defp lock_competition_sides(side_ids, round_id) do
+    Enum.reduce_while(side_ids, :ok, fn side_id, :ok ->
+      case Repo.query!(
+             """
+             SELECT id::text
+             FROM competition_sides
+             WHERE id = $1::uuid AND round_id = $2::uuid
+             FOR UPDATE
+             """,
+             [Ecto.UUID.dump!(side_id), Ecto.UUID.dump!(round_id)]
+           ).rows do
+        [[_id]] -> {:cont, :ok}
+        [] -> {:halt, {:error, :competition_side_not_found}}
+      end
+    end)
+  end
+
+  defp lock_current_starter_entries_on_sides(side_ids, round_id) do
+    side_ids
+    |> Enum.flat_map(fn side_id -> current_starter_entry_ids_on_side(side_id, round_id) end)
+    |> Enum.uniq()
+    |> Enum.sort_by(&Ecto.UUID.dump!/1)
+    |> Enum.reduce_while(:ok, fn locked_entry_id, :ok ->
+      case Repo.query!(
+             "SELECT id::text FROM round_entries WHERE id = $1::uuid AND round_id = $2::uuid FOR UPDATE",
+             [Ecto.UUID.dump!(locked_entry_id), Ecto.UUID.dump!(round_id)]
+           ).rows do
+        [[_id]] -> {:cont, :ok}
+        [] -> {:halt, {:error, :round_entry_not_found}}
+      end
+    end)
+  end
+
+  defp current_starter_entry_ids_on_side(side_id, round_id) do
+    side_id
+    |> load_side_member_entries(round_id)
+    |> Enum.filter(&StartingParticipant.current_starting_participant?/1)
+    |> Enum.map(& &1.id)
+  end
+
+  defp verify_side_group_cohesion(side_ids, round_id, moving_entry_id, target_group_id) do
+    Enum.reduce_while(side_ids, :ok, fn side_id, :ok ->
+      case side_cohesion_ok?(side_id, round_id, moving_entry_id, target_group_id) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp side_cohesion_ok?(side_id, round_id, moving_entry_id, target_group_id) do
+    starters =
+      side_id
+      |> load_side_member_entries(round_id)
+      |> Enum.filter(&StartingParticipant.current_starting_participant?/1)
+
+    if length(starters) < 2 do
+      :ok
+    else
+      effective_groups =
+        Enum.map(starters, fn member ->
+          if member.id == moving_entry_id do
+            target_group_id
+          else
+            member.playing_group_id
+          end
+        end)
+
+      assigned_groups = effective_groups |> Enum.reject(&is_nil/1) |> Enum.uniq()
+
+      if length(assigned_groups) > 1 do
+        {:error, :competition_side_split_across_groups}
+      else
+        :ok
+      end
+    end
+  end
+
+  defp load_side_member_entries(side_id, round_id) do
+    Repo.query!(
+      """
+      SELECT re.id::text, re.event_id::text, re.round_id::text,
+             re.registration_status, re.participation_status, re.playing_group_id::text
+      FROM competition_side_memberships csm
+      JOIN round_entries re ON re.id = csm.round_entry_id
+      WHERE csm.competition_side_id = $1::uuid
+        AND csm.round_id = $2::uuid
+      ORDER BY re.id
+      """,
+      [Ecto.UUID.dump!(side_id), Ecto.UUID.dump!(round_id)]
+    ).rows
+    |> Enum.map(fn [id, eid, rid, reg, part, group_id] ->
+      %{
+        id: Ecto.UUID.cast!(id),
+        event_id: Ecto.UUID.cast!(eid),
+        round_id: Ecto.UUID.cast!(rid),
+        registration_status: String.to_existing_atom(reg),
+        participation_status: String.to_existing_atom(part),
+        playing_group_id: cast_optional_uuid(group_id)
+      }
+    end)
   end
 
   defp assign_entry(%{id: entry_id, playing_group_id: current_group_id}, playing_group_id)
