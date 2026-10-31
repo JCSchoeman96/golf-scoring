@@ -180,9 +180,8 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
       :ok
     else
       with :ok <- lock_competition_sides(side_ids, round_id),
-           :ok <- lock_current_starter_entries_on_sides(side_ids, round_id),
-           :ok <- verify_side_group_cohesion(side_ids, round_id, entry_id, target_group_id) do
-        :ok
+           :ok <- lock_current_starter_entries_on_sides(side_ids, round_id) do
+        verify_side_group_cohesion(side_ids, round_id, entry_id, target_group_id)
       end
     end
   end
@@ -251,26 +250,25 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
       |> load_side_member_entries(round_id)
       |> Enum.filter(&StartingParticipant.current_starting_participant?/1)
 
-    if length(starters) < 2 do
-      :ok
+    if partnership_split_across_groups?(starters, moving_entry_id, target_group_id) do
+      {:error, :competition_side_split_across_groups}
     else
-      effective_groups =
-        Enum.map(starters, fn member ->
-          if member.id == moving_entry_id do
-            target_group_id
-          else
-            member.playing_group_id
-          end
-        end)
-
-      assigned_groups = effective_groups |> Enum.reject(&is_nil/1) |> Enum.uniq()
-
-      if length(assigned_groups) > 1 do
-        {:error, :competition_side_split_across_groups}
-      else
-        :ok
-      end
+      :ok
     end
+  end
+
+  defp partnership_split_across_groups?(starters, _moving_entry_id, _target_group_id)
+       when length(starters) < 2,
+       do: false
+
+  defp partnership_split_across_groups?(starters, moving_entry_id, target_group_id) do
+    starters
+    |> Enum.map(fn member ->
+      if member.id == moving_entry_id, do: target_group_id, else: member.playing_group_id
+    end)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> then(&(length(&1) > 1))
   end
 
   defp load_side_member_entries(side_id, round_id) do
