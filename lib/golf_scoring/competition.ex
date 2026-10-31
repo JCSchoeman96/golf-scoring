@@ -37,5 +37,10 @@ defmodule GolfScoring.Competition do
       define :withdraw_before_start, action: :withdraw_before_start
       define :get_round_entry_by_id, action: :read, get_by: [:id]
     end
+
+    resource GolfScoring.Competition.PlayingGroup do
+      define :create_playing_group, action: :create_playing_group, args: [:event_id, :round_id]
+      define :get_playing_group_by_id, action: :read, get_by: [:id]
+    end
   end
 end
