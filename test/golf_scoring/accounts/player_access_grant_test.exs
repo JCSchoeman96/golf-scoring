@@ -8,8 +8,8 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
   alias Ash.Resource.Info
   alias Ecto.Adapters.SQL.Sandbox
   alias GolfScoring.Accounts
-  alias GolfScoring.Accounts.PlayerAccessGrant
   alias GolfScoring.Accounts.PlayerAccessExchange
+  alias GolfScoring.Accounts.PlayerAccessGrant
   alias GolfScoring.Accounts.PlayerAccessToken
   alias GolfScoring.Accounts.Services.IssuePlayerAccess
   alias GolfScoring.Accounts.Services.ReissuePlayerAccess
@@ -248,7 +248,7 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
              Accounts.reissue_player_access(setup.admin, setup.event.id, setup.player.id)
 
     assert {:error, :invalid_credentials} =
-             GolfScoring.Accounts.PlayerAccessExchange.exchange(original_token)
+             PlayerAccessExchange.exchange(original_token)
 
     conn = conn |> recycle() |> get("/player/")
     assert redirected_to(conn) == "/"
@@ -318,7 +318,7 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
     assert revoked.state == :revoked
 
     assert {:error, :invalid_credentials} =
-             GolfScoring.Accounts.PlayerAccessExchange.exchange(token)
+             PlayerAccessExchange.exchange(token)
   end
 
   test "revoke authorization excludes registration and scoring support" do
@@ -422,7 +422,7 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
              )
 
     assert {:error, :invalid_credentials} =
-             GolfScoring.Accounts.PlayerAccessExchange.exchange(token)
+             PlayerAccessExchange.exchange(token)
 
     reloaded = Ash.get!(PlayerAccessGrant, grant.id, authorize?: false)
     assert reloaded.state == :expired
@@ -464,7 +464,7 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
              )
 
     assert {:error, :invalid_credentials} =
-             GolfScoring.Accounts.PlayerAccessExchange.exchange(expired_token)
+             PlayerAccessExchange.exchange(expired_token)
 
     states =
       PlayerAccessGrant
