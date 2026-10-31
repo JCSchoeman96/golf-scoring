@@ -46,25 +46,26 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
     staff = Repo.get!(StaffUser, socket.assigns.current_staff_user.id)
     round = socket.assigns.round
 
-    with {:ok, course_hole_ids} <- parse_route_selections(route_params) do
-      case ConfigureRoundLayout.run(staff, round.id, course_hole_ids) do
-        {:ok, route} ->
-          {:noreply,
-           socket
-           |> put_flash(:info, "Round route saved (#{length(route)} holes).")
-           |> refresh_round_state(round)}
-
-        {:error, :forbidden} ->
-          {:noreply,
-           put_flash(socket, :error, "You are not allowed to configure this Round route.")}
-
-        {:error, reason} ->
-          {:noreply, put_flash(socket, :error, "Route save failed: #{format_error(reason)}")}
-      end
-    else
+    case parse_route_selections(route_params) do
       {:error, :invalid_input} ->
         {:noreply,
          put_flash(socket, :error, "Choose a valid course hole for every play position.")}
+
+      {:ok, course_hole_ids} ->
+        case ConfigureRoundLayout.run(staff, round.id, course_hole_ids) do
+          {:ok, route} ->
+            {:noreply,
+             socket
+             |> put_flash(:info, "Round route saved (#{length(route)} holes).")
+             |> refresh_round_state(round)}
+
+          {:error, :forbidden} ->
+            {:noreply,
+             put_flash(socket, :error, "You are not allowed to configure this Round route.")}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, "Route save failed: #{format_error(reason)}")}
+        end
     end
   end
 
@@ -75,30 +76,12 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
 
     profile_ids = Map.get(params, "profile_ids", []) |> List.wrap()
 
-    with {:ok, selected} <- InputParsing.parse_uuids(profile_ids) do
-      case SnapshotRoundTeeProfiles.run(staff, round.id, selected) do
-        {:ok, snapshots} ->
-          message =
-            if snapshots == [] do
-              "Cleared all tee profile snapshots."
-            else
-              "Snapshotted #{length(snapshots)} tee profile(s)."
-            end
-
-          {:noreply,
-           socket
-           |> put_flash(:info, message)
-           |> refresh_round_state(round)}
-
-        {:error, :forbidden} ->
-          {:noreply, put_flash(socket, :error, "You are not allowed to snapshot tee profiles.")}
-
-        {:error, reason} ->
-          {:noreply, put_flash(socket, :error, "Snapshot failed: #{format_error(reason)}")}
-      end
-    else
+    case InputParsing.parse_uuids(profile_ids) do
       {:error, :invalid_input} ->
         {:noreply, put_flash(socket, :error, "Selected tee profiles must be valid.")}
+
+      {:ok, selected} ->
+        respond_to_snapshot_run(staff, round, selected, socket)
     end
   end
 
@@ -201,6 +184,27 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
     </Layouts.app>
     """
   end
+
+  defp respond_to_snapshot_run(staff, round, selected, socket) do
+    case SnapshotRoundTeeProfiles.run(staff, round.id, selected) do
+      {:ok, snapshots} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, snapshot_success_message(snapshots))
+         |> refresh_round_state(round)}
+
+      {:error, :forbidden} ->
+        {:noreply, put_flash(socket, :error, "You are not allowed to snapshot tee profiles.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Snapshot failed: #{format_error(reason)}")}
+    end
+  end
+
+  defp snapshot_success_message([]), do: "Cleared all tee profile snapshots."
+
+  defp snapshot_success_message(snapshots),
+    do: "Snapshotted #{length(snapshots)} tee profile(s)."
 
   defp fetch_round(round_id) do
     case Competition.get_round_by_id(round_id, authorize?: false) do

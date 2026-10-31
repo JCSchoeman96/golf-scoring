@@ -82,26 +82,27 @@ defmodule GolfScoringWeb.Admin.CourseSetupLive do
     event_id = socket.assigns.event_id
     course_id = socket.assigns.selected_course_id
 
-    with {:ok, hole_number} <- InputParsing.parse_positive_integer(params["hole_number"]) do
-      attrs = %{course_id: course_id, hole_number: hole_number}
-
-      case GolfCatalog.configure_course_hole(event_id, attrs, actor: staff) do
-        {:ok, _} ->
-          {:noreply,
-           socket
-           |> put_flash(:info, "Course hole saved.")
-           |> refresh_course_details(course_id)}
-
-        {:error, %Ash.Error.Forbidden{}} ->
-          {:noreply,
-           put_flash(socket, :error, "Catalog changes require an active Event Admin role.")}
-
-        {:error, _} ->
-          {:noreply, put_flash(socket, :error, "Could not save the Course hole.")}
-      end
-    else
+    case InputParsing.parse_positive_integer(params["hole_number"]) do
       {:error, :invalid_input} ->
         {:noreply, put_flash(socket, :error, "Hole number must be a positive integer.")}
+
+      {:ok, hole_number} ->
+        attrs = %{course_id: course_id, hole_number: hole_number}
+
+        case GolfCatalog.configure_course_hole(event_id, attrs, actor: staff) do
+          {:ok, _} ->
+            {:noreply,
+             socket
+             |> put_flash(:info, "Course hole saved.")
+             |> refresh_course_details(course_id)}
+
+          {:error, %Ash.Error.Forbidden{}} ->
+            {:noreply,
+             put_flash(socket, :error, "Catalog changes require an active Event Admin role.")}
+
+          {:error, _} ->
+            {:noreply, put_flash(socket, :error, "Could not save the Course hole.")}
+        end
     end
   end
 
