@@ -223,7 +223,7 @@ defmodule GolfScoringWeb.Admin.CourseSetupLive do
                 </li>
               </ul>
               <.form id="course-hole-form" for={%{}} phx-submit="configure_hole">
-                <.input name="hole[hole_number]" type="number" label="Hole number" value="1" />
+                <.input name="hole[hole_number]" type="number" label="Hole number" value="" />
                 <button id="course-hole-save-button" type="submit" class="btn btn-primary mt-3">
                   Save hole
                 </button>
@@ -236,7 +236,13 @@ defmodule GolfScoringWeb.Admin.CourseSetupLive do
                 <li :for={tee <- @tee_sets}>{tee.name}</li>
               </ul>
               <.form id="tee-set-form" for={%{}} phx-submit="configure_tee_set">
-                <.input name="tee_set[name]" type="text" label="Tee set name" value="White" />
+                <.input
+                  name="tee_set[name]"
+                  type="text"
+                  label="Tee set name"
+                  value=""
+                  placeholder="e.g. White"
+                />
                 <button id="tee-set-save-button" type="submit" class="btn btn-primary mt-3">
                   Save tee set
                 </button>
@@ -260,15 +266,34 @@ defmodule GolfScoringWeb.Admin.CourseSetupLive do
                   options={Enum.map(@tee_sets, &{&1.name, &1.id})}
                   prompt="Choose tee set"
                 />
-                <.input name="tee_profile[rating_label]" type="text" label="Rating label" value="Men" />
+                <.input
+                  name="tee_profile[rating_label]"
+                  type="text"
+                  label="Rating label"
+                  value=""
+                  placeholder="e.g. Competition White"
+                />
                 <.input
                   name="tee_profile[course_rating]"
                   type="text"
                   label="Course rating"
-                  value="72.0"
+                  value=""
+                  placeholder="e.g. 70.8"
                 />
-                <.input name="tee_profile[slope_rating]" type="number" label="Slope" value="113" />
-                <.input name="tee_profile[total_par]" type="number" label="Total par" value="72" />
+                <.input
+                  name="tee_profile[slope_rating]"
+                  type="number"
+                  label="Slope"
+                  value=""
+                  placeholder="55–155"
+                />
+                <.input
+                  name="tee_profile[total_par]"
+                  type="number"
+                  label="Total par"
+                  value=""
+                  placeholder="Sum of hole pars"
+                />
                 <div id="tee-profile-hole-ratings" class="mt-4 space-y-3">
                   <h3 class="text-sm font-semibold">Per-hole ratings</h3>
                   <%= for hole <- @course_holes do %>
@@ -280,13 +305,15 @@ defmodule GolfScoringWeb.Admin.CourseSetupLive do
                         name={"tee_profile[hole_ratings][#{hole.id}][par]"}
                         type="number"
                         label="Par"
-                        value="4"
+                        value=""
+                        placeholder="3–5"
                       />
                       <.input
                         name={"tee_profile[hole_ratings][#{hole.id}][stroke_index]"}
                         type="number"
                         label="Stroke index"
-                        value={to_string(hole.hole_number)}
+                        value=""
+                        placeholder="1–18"
                       />
                       <.input
                         name={"tee_profile[hole_ratings][#{hole.id}][distance_m]"}

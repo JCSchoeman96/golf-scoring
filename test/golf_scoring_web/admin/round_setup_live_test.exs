@@ -3,6 +3,8 @@ defmodule GolfScoringWeb.Admin.RoundSetupLiveTest do
 
   import Phoenix.LiveViewTest
 
+  import Ecto.Query
+
   alias Ecto.Adapters.SQL.Sandbox
   alias GolfScoring.Accounts
   alias GolfScoring.Competition
@@ -75,6 +77,75 @@ defmodule GolfScoringWeb.Admin.RoundSetupLiveTest do
 
     assert {:error, {:live_redirect, %{to: "/admin"}}} =
              live(conn, ~p"/admin/events/#{other_event.id}/rounds/#{setup.round.id}/setup")
+  end
+
+  test "empty snapshot selection is non-destructive", %{conn: conn} do
+    setup = seed_round_setup!()
+    conn = authenticate(conn, setup.admin.email)
+
+    route_params =
+      setup.holes
+      |> Enum.with_index(1)
+      |> Map.new(fn {hole, play_order} -> {"hole_#{play_order}", hole.id} end)
+
+    {:ok, view, _html} =
+      live(conn, ~p"/admin/events/#{setup.event.id}/rounds/#{setup.round.id}/setup")
+
+    render_submit(element(view, "#round-route-form"), %{"route" => route_params})
+
+    render_submit(element(view, "#round-snapshot-form"), %{
+      "snapshot" => %{"profile_ids" => [setup.profile.id]}
+    })
+
+    before_count =
+      Repo.one!(
+        from(s in GolfScoring.Competition.RoundTeeProfileSnapshot,
+          where: s.round_id == ^setup.round.id,
+          select: count(s.id)
+        )
+      )
+
+    assert before_count == 1
+
+    render_submit(element(view, "#round-snapshot-form"), %{"snapshot" => %{}})
+
+    after_count =
+      Repo.one!(
+        from(s in GolfScoring.Competition.RoundTeeProfileSnapshot,
+          where: s.round_id == ^setup.round.id,
+          select: count(s.id)
+        )
+      )
+
+    assert after_count == before_count
+  end
+
+  test "explicit clear removes all snapshots", %{conn: conn} do
+    setup = seed_round_setup!()
+    conn = authenticate(conn, setup.admin.email)
+
+    route_params =
+      setup.holes
+      |> Enum.with_index(1)
+      |> Map.new(fn {hole, play_order} -> {"hole_#{play_order}", hole.id} end)
+
+    {:ok, view, _html} =
+      live(conn, ~p"/admin/events/#{setup.event.id}/rounds/#{setup.round.id}/setup")
+
+    render_submit(element(view, "#round-route-form"), %{"route" => route_params})
+
+    render_submit(element(view, "#round-snapshot-form"), %{
+      "snapshot" => %{"profile_ids" => [setup.profile.id]}
+    })
+
+    render_click(element(view, "#round-clear-snapshots-button"))
+
+    assert Repo.one!(
+             from(s in GolfScoring.Competition.RoundTeeProfileSnapshot,
+               where: s.round_id == ^setup.round.id,
+               select: count(s.id)
+             )
+           ) == 0
   end
 
   test "malformed snapshot selection shows a controlled error", %{conn: conn} do

@@ -7,6 +7,7 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
   alias GolfScoring.Accounts.StaffUser
   alias GolfScoring.Competition
   alias GolfScoring.Competition.Round
+  alias GolfScoring.Competition.Services.ClearRoundTeeSnapshots
   alias GolfScoring.Competition.Services.ConfigureRoundLayout
   alias GolfScoring.Competition.Services.SnapshotRoundTeeProfiles
   alias GolfScoring.Repo
@@ -81,7 +82,16 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
         {:noreply, put_flash(socket, :error, "Selected tee profiles must be valid.")}
 
       {:ok, selected} ->
-        respond_to_snapshot_run(staff, round, selected, socket)
+        if selected == [] do
+          {:noreply,
+           put_flash(
+             socket,
+             :error,
+             "Select at least one tee profile to snapshot. To remove snapshots, use Clear all snapshots."
+           )}
+        else
+          respond_to_snapshot_run(staff, round, selected, socket)
+        end
     end
   end
 
@@ -89,7 +99,7 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
     staff = Repo.get!(StaffUser, socket.assigns.current_staff_user.id)
     round = socket.assigns.round
 
-    case SnapshotRoundTeeProfiles.run(staff, round.id, []) do
+    case ClearRoundTeeSnapshots.run(staff, round.id) do
       {:ok, []} ->
         {:noreply,
          socket
@@ -200,8 +210,6 @@ defmodule GolfScoringWeb.Admin.RoundSetupLive do
         {:noreply, put_flash(socket, :error, "Snapshot failed: #{format_error(reason)}")}
     end
   end
-
-  defp snapshot_success_message([]), do: "Cleared all tee profile snapshots."
 
   defp snapshot_success_message(snapshots),
     do: "Snapshotted #{length(snapshots)} tee profile(s)."

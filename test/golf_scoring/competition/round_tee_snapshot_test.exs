@@ -11,6 +11,7 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
   alias GolfScoring.Competition.Round
   alias GolfScoring.Competition.RoundTeeHoleSnapshot
   alias GolfScoring.Competition.RoundTeeProfileSnapshot
+  alias GolfScoring.Competition.Services.ClearRoundTeeSnapshots
   alias GolfScoring.Competition.Services.ConfigureRoundLayout
   alias GolfScoring.Competition.Services.SnapshotRoundTeeProfiles
   alias GolfScoring.GolfCatalog
@@ -240,7 +241,8 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
 
     {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
 
-    assert {:ok, []} = SnapshotRoundTeeProfiles.run(admin, round.id, [])
+    assert {:error, :no_tee_rating_profiles} =
+             SnapshotRoundTeeProfiles.run(admin, round.id, [])
 
     assert {:error, :duplicate_tee_rating_profile} =
              SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id, profile.id])
@@ -312,7 +314,33 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
              SnapshotRoundTeeProfiles.run(admin, round.id, [profile_b.id])
   end
 
-  test "route structural change is blocked while snapshots exist unless snapshots are cleared" do
+  test "route structural change is blocked while snapshots exist" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    tee_set = create_tee_set!(event, admin, course, "White")
+    profile = create_profile!(event, admin, tee_set, holes, "Men")
+
+    {:ok, spare_hole} =
+      GolfCatalog.configure_course_hole(
+        event.id,
+        %{course_id: course.id, hole_number: 19},
+        actor: admin
+      )
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    route_ids = Enum.map(holes, & &1.id)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, route_ids)
+    assert {:ok, [_]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+
+    swapped = [spare_hole.id | Enum.take(route_ids, 17)]
+
+    assert {:error, :round_snapshots_block_route_change} =
+             ConfigureRoundLayout.run(admin, round.id, swapped)
+  end
+
+  test "explicit clear allows structural route change in draft|ready" do
     event = create_event!()
     admin = create_event_admin!(event)
     course = create_course!(event, admin)
@@ -337,7 +365,7 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
     assert {:error, :round_snapshots_block_route_change} =
              ConfigureRoundLayout.run(admin, round.id, swapped)
 
-    assert {:ok, []} = SnapshotRoundTeeProfiles.run(admin, round.id, [])
+    assert {:ok, []} = ClearRoundTeeSnapshots.run(admin, round.id)
     assert {:ok, _} = ConfigureRoundLayout.run(admin, round.id, swapped)
   end
 
@@ -478,8 +506,10 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
 
     {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
     {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
-    assert {:ok, [existing]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile_a.id])
-    before = snapshot_values(existing.id)
+    assert {:ok, [_existing]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile_a.id])
+
+    before_profiles = round_profile_snapshot_state(round.id)
+    before_holes = round_hole_snapshot_state(round.id)
 
     install_hole_snapshot_failure_trigger!(round.id, 18)
 
@@ -490,7 +520,21 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
       drop_hole_snapshot_failure_trigger!()
     end
 
-    assert snapshot_values(existing.id) == before
+    after_profiles = round_profile_snapshot_state(round.id)
+    after_holes = round_hole_snapshot_state(round.id)
+
+    assert after_profiles.count == before_profiles.count
+    assert after_profiles.ids == before_profiles.ids
+    assert after_profiles.values == before_profiles.values
+    assert after_holes.count == before_holes.count
+    assert after_holes.ids == before_holes.ids
+    assert after_holes.values == before_holes.values
+
+    refute Repo.exists?(
+             from(s in RoundTeeProfileSnapshot,
+               where: s.round_id == ^round.id and s.source_tee_rating_profile_id == ^profile_b.id
+             )
+           )
   end
 
   test "PostgreSQL composite and uniqueness constraints are enforced independently" do
@@ -551,8 +595,8 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
           [
             Ecto.UUID.dump!(fixture.round_b.id),
             Ecto.UUID.dump!(fixture.course_b.id),
-            Ecto.UUID.dump!(fixture.tee_set_a.id),
-            Ecto.UUID.dump!(fixture.profile_b.id)
+            Ecto.UUID.dump!(fixture.tee_set_b2.id),
+            Ecto.UUID.dump!(fixture.profile_b1.id)
           ]
         )
       end,
@@ -797,6 +841,53 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
     end)
   end
 
+  defp round_profile_snapshot_state(round_id) do
+    rows =
+      Repo.query!(
+        """
+        SELECT id::text, source_tee_rating_profile_id::text, rating_label, course_rating::text,
+               slope_rating, total_par, applicable_par
+        FROM round_tee_profile_snapshots
+        WHERE round_id = $1::uuid
+        ORDER BY id
+        """,
+        [Ecto.UUID.dump!(round_id)]
+      ).rows
+
+    ids = Enum.map(rows, fn [id | _] -> Ecto.UUID.cast!(id) end)
+
+    values =
+      Enum.map(rows, fn [_id, source_id, label, course_rating, slope, total_par, applicable_par] ->
+        {Ecto.UUID.cast!(source_id), label, course_rating, slope, total_par, applicable_par}
+      end)
+
+    %{count: length(rows), ids: ids, values: values}
+  end
+
+  defp round_hole_snapshot_state(round_id) do
+    rows =
+      Repo.query!(
+        """
+        SELECT id::text, round_tee_profile_snapshot_id::text, round_hole_id::text,
+               par, stroke_index, distance_m
+        FROM round_tee_hole_snapshots
+        WHERE round_id = $1::uuid
+        ORDER BY id
+        """,
+        [Ecto.UUID.dump!(round_id)]
+      ).rows
+
+    ids = Enum.map(rows, fn [id | _] -> Ecto.UUID.cast!(id) end)
+
+    values =
+      Enum.map(rows, fn [_id, profile_snap_id, round_hole_id, par, stroke_index, distance_m] ->
+        {Ecto.UUID.cast!(profile_snap_id), Ecto.UUID.cast!(round_hole_id), par, stroke_index,
+         distance_m}
+      end)
+
+    %{count: length(rows), ids: ids, values: values}
+  end
+
   defp snapshot_constraint_fixture! do
     event = create_event!()
     admin = create_event_admin!(event)
@@ -805,9 +896,11 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
     holes_a = create_eighteen_holes!(event, admin, course_a)
     holes_b = create_eighteen_holes!(event, admin, course_b)
     tee_set_a = create_tee_set!(event, admin, course_a, "A-White")
-    tee_set_b = create_tee_set!(event, admin, course_b, "B-White")
+    tee_set_b1 = create_tee_set!(event, admin, course_b, "B-White-1")
+    tee_set_b2 = create_tee_set!(event, admin, course_b, "B-White-2")
     profile_a = create_profile!(event, admin, tee_set_a, holes_a, "A-Men")
-    profile_b = create_profile!(event, admin, tee_set_b, holes_b, "B-Men")
+    profile_b1 = create_profile!(event, admin, tee_set_b1, holes_b, "B-Men-1")
+    profile_b = create_profile!(event, admin, tee_set_b1, holes_b, "B-Men-dup")
 
     {:ok, round_a} = Competition.create_round(event.id, course_a.id, actor: admin)
     {:ok, round_b} = Competition.create_round(event.id, course_b.id, actor: admin)
@@ -823,8 +916,11 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
       route_a: route_a,
       route_b: route_b,
       tee_set_a: tee_set_a,
-      tee_set_b: tee_set_b,
+      tee_set_b: tee_set_b1,
+      tee_set_b1: tee_set_b1,
+      tee_set_b2: tee_set_b2,
       profile_a: profile_a,
+      profile_b1: profile_b1,
       profile_b: profile_b
     }
   end
