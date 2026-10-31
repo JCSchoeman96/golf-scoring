@@ -59,17 +59,20 @@ defmodule GolfScoring.Repo.Migrations.Gls20GroupRoleAssignments do
       )
     end
 
-    create unique_index(:group_role_assignments, [:playing_group_id, :role, :assignment_version],
-             name: "group_role_assignments_unique_revision_index"
+    create index(:group_role_assignments, [:playing_group_id, :role, :assignment_version],
+             name: "group_role_assignments_unique_revision_index",
+             unique: true
            )
 
-    create unique_index(:group_role_assignments, [:playing_group_id, :round_entry_id],
+    create index(:group_role_assignments, [:playing_group_id, :round_entry_id],
              name: "group_role_assignments_one_active_entry_per_group_index",
+             unique: true,
              where: "state = 'active'"
            )
 
-    create unique_index(:group_role_assignments, [:playing_group_id, :role],
+    create index(:group_role_assignments, [:playing_group_id, :role],
              name: "group_role_assignments_one_active_per_group_role_index",
+             unique: true,
              where: "state = 'active'"
            )
 

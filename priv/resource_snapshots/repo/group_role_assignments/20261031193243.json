@@ -273,100 +273,11 @@
       "unique": false,
       "using": null,
       "where": null
-    },
-    {
-      "all_tenants?": false,
-      "concurrently": false,
-      "error_fields": [
-        "playing_group_id",
-        "role"
-      ],
-      "fields": [
-        {
-          "type": "atom",
-          "value": "playing_group_id"
-        },
-        {
-          "type": "atom",
-          "value": "role"
-        }
-      ],
-      "include": null,
-      "include_base_filter?": true,
-      "message": null,
-      "name": "group_role_assignments_one_active_per_group_role_index",
-      "nulls_distinct": true,
-      "prefix": null,
-      "table": null,
-      "unique": true,
-      "using": null,
-      "where": "state = 'active'"
-    },
-    {
-      "all_tenants?": false,
-      "concurrently": false,
-      "error_fields": [
-        "playing_group_id",
-        "round_entry_id"
-      ],
-      "fields": [
-        {
-          "type": "atom",
-          "value": "playing_group_id"
-        },
-        {
-          "type": "atom",
-          "value": "round_entry_id"
-        }
-      ],
-      "include": null,
-      "include_base_filter?": true,
-      "message": null,
-      "name": "group_role_assignments_one_active_entry_per_group_index",
-      "nulls_distinct": true,
-      "prefix": null,
-      "table": null,
-      "unique": true,
-      "using": null,
-      "where": "state = 'active'"
-    },
-    {
-      "all_tenants?": false,
-      "concurrently": false,
-      "error_fields": [
-        "playing_group_id",
-        "role",
-        "assignment_version"
-      ],
-      "fields": [
-        {
-          "type": "atom",
-          "value": "playing_group_id"
-        },
-        {
-          "type": "atom",
-          "value": "role"
-        },
-        {
-          "type": "atom",
-          "value": "assignment_version"
-        }
-      ],
-      "include": null,
-      "include_base_filter?": true,
-      "message": null,
-      "name": "group_role_assignments_unique_revision_index",
-      "nulls_distinct": true,
-      "prefix": null,
-      "table": null,
-      "unique": true,
-      "using": null,
-      "where": null
     }
   ],
   "custom_statements": [],
   "has_create_action": true,
-  "hash": "3F72BAF6F1441BE32F474C35DCF9BDCC8CB22044E82626D5B6D76B9840CED0F8",
+  "hash": "02552D67F0E99CE8637B81BBF1D9FC8F5801796507158B5DDCC74A582563B661",
   "identities": [
     {
       "all_tenants?": false,
