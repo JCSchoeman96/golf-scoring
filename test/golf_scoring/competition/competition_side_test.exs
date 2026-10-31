@@ -12,13 +12,13 @@ defmodule GolfScoring.Competition.CompetitionSideTest do
   alias GolfScoring.Competition.CompetitionSideMembership
   alias GolfScoring.Competition.CompetitionSideResult
   alias GolfScoring.Competition.Event
+  alias GolfScoring.Competition.FourBallStablefordV1SidePolicy
   alias GolfScoring.Competition.RoundCompetition
   alias GolfScoring.Competition.Services.AssignEntryToGroup
   alias GolfScoring.Competition.Services.ConfigureRoundCompetition
   alias GolfScoring.Competition.Services.CreateCompetitionSide
   alias GolfScoring.Competition.Services.ReplaceRoundEntry
   alias GolfScoring.Competition.Services.SetSideMembership
-  alias GolfScoring.Competition.FourBallStablefordV1SidePolicy
   alias GolfScoring.Competition.StartingParticipant
   alias GolfScoring.Repo
 

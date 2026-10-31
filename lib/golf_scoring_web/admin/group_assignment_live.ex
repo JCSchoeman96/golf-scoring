@@ -15,13 +15,13 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
   alias GolfScoring.Competition.PlayingGroupReadiness
   alias GolfScoring.Competition.Round
   alias GolfScoring.Competition.RoundCompetition
+  alias GolfScoring.Competition.RoundEntry
   alias GolfScoring.Competition.RoundHole
   alias GolfScoring.Competition.Services.AssignEntryToGroup
   alias GolfScoring.Competition.Services.AssignPlayingGroupStart
   alias GolfScoring.Competition.Services.ConfigureRoundCompetition
   alias GolfScoring.Competition.Services.CreateCompetitionSide
   alias GolfScoring.Competition.Services.SetSideMembership
-  alias GolfScoring.Competition.RoundEntry
   alias GolfScoring.Competition.StartingParticipant
   alias GolfScoring.Competition.StartingPositionLabel
   alias GolfScoring.Repo
@@ -667,13 +667,7 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
     Enum.map(sides, fn side ->
       all_member_ids = Map.get(memberships, side.id, [])
 
-      current_member_ids =
-        Enum.filter(all_member_ids, fn entry_id ->
-          case Map.get(entries_by_id, entry_id) do
-            nil -> false
-            entry -> StartingParticipant.current_starting_participant?(entry)
-          end
-        end)
+      current_member_ids = current_starter_member_ids(all_member_ids, entries_by_id)
 
       %{
         id: side.id,
@@ -706,4 +700,15 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
   end
 
   defp parse_entry_id_list(_), do: {:error, :invalid_input}
+
+  defp current_starter_member_ids(member_ids, entries_by_id) do
+    Enum.filter(member_ids, &side_member_current_starter?(entries_by_id, &1))
+  end
+
+  defp side_member_current_starter?(entries_by_id, entry_id) do
+    case Map.get(entries_by_id, entry_id) do
+      nil -> false
+      entry -> StartingParticipant.current_starting_participant?(entry)
+    end
+  end
 end

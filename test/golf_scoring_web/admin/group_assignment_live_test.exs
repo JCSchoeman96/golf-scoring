@@ -8,7 +8,9 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLiveTest do
   alias GolfScoring.Accounts
   alias GolfScoring.Competition
   alias GolfScoring.Competition.Event
+  alias GolfScoring.Competition.Player
   alias GolfScoring.Competition.RoundHole
+  alias GolfScoring.Competition.Services.ReplaceRoundEntry
   alias GolfScoring.Repo
 
   @password "GLS-18 synthetic staff passphrase 2026"
@@ -87,7 +89,7 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLiveTest do
     assert render(view) =~ e2.id
 
     replacement_player =
-      GolfScoring.Competition.Player
+      Player
       |> Changeset.for_create(:create_internal, %{
         first_name: "Rep",
         surname: "Lace#{System.unique_integer([:positive])}"
@@ -95,7 +97,7 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLiveTest do
       |> Ash.create!(authorize?: false)
 
     assert {:ok, _} =
-             GolfScoring.Competition.Services.ReplaceRoundEntry.run(
+             ReplaceRoundEntry.run(
                setup.admin,
                setup.event.id,
                setup.round.id,
