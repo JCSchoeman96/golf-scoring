@@ -15,8 +15,10 @@ defmodule GolfScoring.Competition.Services.ClearRoundTeeSnapshots do
     actor_id = Map.get(actor, :id)
 
     Repo.transaction(fn ->
-      with {:ok, round} <- lock_round(round_id),
-           {:ok, _scope} <- EventAuthorityLock.lock_scope!(round.event_id, [actor_id]),
+      with {:ok, preliminary_round} <- fetch_round(round_id),
+           {:ok, _scope} <-
+             EventAuthorityLock.lock_scope!(preliminary_round.event_id, [actor_id]),
+           {:ok, round} <- lock_round(round_id),
            :ok <- authorize(actor_id, round.event_id),
            :ok <- round_accepts_clear(round),
            :ok <- remove_all_snapshots(round.id) do
@@ -29,6 +31,31 @@ defmodule GolfScoring.Competition.Services.ClearRoundTeeSnapshots do
   end
 
   def run(_actor, _round_id), do: {:error, :invalid_input}
+
+  defp fetch_round(round_id) do
+    case round_row(round_id) do
+      nil -> {:error, :round_not_found}
+      round -> {:ok, round}
+    end
+  end
+
+  defp round_row(round_id) do
+    case Repo.query!(
+           "SELECT id::text, event_id::text, course_id::text, state FROM rounds WHERE id = $1::uuid",
+           [Ecto.UUID.dump!(round_id)]
+         ).rows do
+      [[id, event_id, course_id, state]] ->
+        %{
+          id: Ecto.UUID.cast!(id),
+          event_id: Ecto.UUID.cast!(event_id),
+          course_id: Ecto.UUID.cast!(course_id),
+          state: state
+        }
+
+      [] ->
+        nil
+    end
+  end
 
   defp lock_round(round_id) do
     case round_row_for_update(round_id) do

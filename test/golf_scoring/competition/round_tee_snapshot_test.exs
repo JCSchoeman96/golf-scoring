@@ -369,6 +369,79 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
     assert {:ok, _} = ConfigureRoundLayout.run(admin, round.id, swapped)
   end
 
+  @tag :real_concurrency
+  test "ClearRoundTeeSnapshots and ConfigureRoundLayout serialize without deadlock or partial state" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    tee_set = create_tee_set!(event, admin, course, "White")
+    profile = create_profile!(event, admin, tee_set, holes, "Men")
+
+    {:ok, spare_hole} =
+      GolfCatalog.configure_course_hole(
+        event.id,
+        %{course_id: course.id, hole_number: 19},
+        actor: admin
+      )
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    route_ids = Enum.map(holes, & &1.id)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, route_ids)
+    assert {:ok, [_]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+
+    swapped = [spare_hole.id | Enum.take(route_ids, 17)]
+    original_set = MapSet.new(route_ids)
+    swapped_set = MapSet.new(swapped)
+    test_pid = self()
+
+    for _ <- 1..8 do
+      assert round_profile_snapshot_count(round.id) == 1
+      assert MapSet.new(round_route_course_hole_ids(round.id)) == original_set
+
+      clear_task =
+        Task.async(fn ->
+          Sandbox.allow(Repo, test_pid, self())
+          ClearRoundTeeSnapshots.run(%{id: admin.id}, round.id)
+        end)
+
+      route_task =
+        Task.async(fn ->
+          Sandbox.allow(Repo, test_pid, self())
+          ConfigureRoundLayout.run(%{id: admin.id}, round.id, swapped)
+        end)
+
+      clear_result = Task.await(clear_task, 30_000)
+      route_result = Task.await(route_task, 30_000)
+
+      refute gls14_deadlock_result?(clear_result)
+      refute gls14_deadlock_result?(route_result)
+      refute gls14_foreign_key_result?(clear_result)
+      refute gls14_foreign_key_result?(route_result)
+      assert gls14_valid_route_result?(route_result)
+      assert match?({:ok, []}, clear_result)
+
+      after_snapshots = round_profile_snapshot_count(round.id)
+      after_set = MapSet.new(round_route_course_hole_ids(round.id))
+
+      case {after_snapshots, route_result} do
+        {0, {:ok, _}} ->
+          assert after_set == swapped_set
+
+        {0, {:error, :round_snapshots_block_route_change}} ->
+          assert after_set == original_set
+
+        _ ->
+          flunk(
+            "unexpected concurrent end state snapshots=#{after_snapshots} route=#{inspect(route_result)}"
+          )
+      end
+
+      {:ok, _} = ConfigureRoundLayout.run(admin, round.id, route_ids)
+      assert {:ok, [_]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+    end
+  end
+
   test "missing route-hole rating is rejected without mutating snapshots" do
     event = create_event!()
     admin = create_event_admin!(event)
@@ -939,6 +1012,45 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
     Accounts.EventStaffAssignment
     |> Ash.get!(assignment_id, authorize?: false)
   end
+
+  defp round_profile_snapshot_count(round_id) do
+    [[count]] =
+      Repo.query!(
+        "SELECT count(*) FROM round_tee_profile_snapshots WHERE round_id = $1::uuid",
+        [Ecto.UUID.dump!(round_id)]
+      ).rows
+
+    count
+  end
+
+  defp round_route_course_hole_ids(round_id) do
+    Repo.query!(
+      """
+      SELECT course_hole_id::text
+      FROM round_holes
+      WHERE round_id = $1::uuid
+      ORDER BY play_order
+      """,
+      [Ecto.UUID.dump!(round_id)]
+    ).rows
+    |> Enum.map(fn [id] -> Ecto.UUID.cast!(id) end)
+  end
+
+  defp gls14_valid_route_result?({:ok, _}), do: true
+  defp gls14_valid_route_result?({:error, :round_snapshots_block_route_change}), do: true
+  defp gls14_valid_route_result?(_), do: false
+
+  defp gls14_deadlock_result?({:error, %Postgrex.Error{postgres: %{code: :deadlock_detected}}}),
+    do: true
+
+  defp gls14_deadlock_result?(_), do: false
+
+  defp gls14_foreign_key_result?(
+         {:error, %Postgrex.Error{postgres: %{code: :foreign_key_violation}}}
+       ),
+       do: true
+
+  defp gls14_foreign_key_result?(_), do: false
 
   defp install_hole_snapshot_failure_trigger!(_round_id, max_rows) do
     Repo.query!("""
