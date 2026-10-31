@@ -1,4 +1,4 @@
-defmodule GolfScoring.Repo.Migrations.Gls16PlayersRoundEntries do
+defmodule GolfScoring.Repo.Migrations.Gls16RoundEntryEventFkRestrict do
   @moduledoc """
   Updates resources based on their most recent snapshots.
 
