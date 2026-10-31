@@ -65,6 +65,10 @@ defmodule GolfScoringWeb.Router do
       live "/", GolfScoringWeb.Admin.DashboardLive, :index
       live "/events/:event_id/course-setup", GolfScoringWeb.Admin.CourseSetupLive, :index
       live "/events/:event_id/rounds/:round_id/setup", GolfScoringWeb.Admin.RoundSetupLive, :index
+
+      live "/events/:event_id/rounds/:round_id/groups",
+           GolfScoringWeb.Admin.GroupAssignmentLive,
+           :index
     end
   end
 

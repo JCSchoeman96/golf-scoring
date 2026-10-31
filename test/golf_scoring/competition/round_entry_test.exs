@@ -10,7 +10,9 @@ defmodule GolfScoring.Competition.RoundEntryTest do
   alias GolfScoring.Competition.Player
   alias GolfScoring.Competition.Round
   alias GolfScoring.Competition.RoundEntry
+  alias GolfScoring.Competition.Services.AssignEntryToGroup
   alias GolfScoring.Competition.Services.ReplaceRoundEntry
+  alias GolfScoring.Competition.StartingParticipant
   alias GolfScoring.Repo
 
   @password "GLS-16 synthetic staff passphrase 2026"
@@ -515,6 +517,108 @@ defmodule GolfScoring.Competition.RoundEntryTest do
     assert round_entry_count(round.id) == 2
   end
 
+  test "replace_before_start inherits original playing group membership" do
+    %{event: event, round: round, admin: admin, player: player} = setup_round!()
+    manager = create_staff_user!()
+    assign_role!(admin, event, manager, :competition_manager)
+    {:ok, group} = Competition.create_playing_group(event.id, round.id, actor: admin)
+
+    assert {:ok, original} =
+             Competition.add_round_entry(event.id, round.id, player.id, actor: admin)
+
+    assert {:ok, grouped} =
+             AssignEntryToGroup.run(
+               admin,
+               event.id,
+               round.id,
+               original.id,
+               group.id
+             )
+
+    replacement_player = create_player!()
+
+    assert {:ok, %{original: marked, replacement: new_entry}} =
+             ReplaceRoundEntry.run(
+               manager,
+               event.id,
+               round.id,
+               grouped.id,
+               replacement_player.id
+             )
+
+    assert marked.registration_status == :replaced_before_start
+    assert marked.playing_group_id == group.id
+    assert new_entry.playing_group_id == group.id
+    assert new_entry.player_id == replacement_player.id
+  end
+
+  test "replace_before_start leaves unassigned replacement when original had no group" do
+    %{event: event, round: round, admin: admin, player: player} = setup_round!()
+    manager = create_staff_user!()
+    assign_role!(admin, event, manager, :competition_manager)
+
+    assert {:ok, original} =
+             Competition.add_round_entry(event.id, round.id, player.id, actor: admin)
+
+    replacement_player = create_player!()
+
+    assert {:ok, %{original: marked, replacement: new_entry}} =
+             ReplaceRoundEntry.run(
+               manager,
+               event.id,
+               round.id,
+               original.id,
+               replacement_player.id
+             )
+
+    assert is_nil(marked.playing_group_id)
+    assert is_nil(new_entry.playing_group_id)
+  end
+
+  test "full four-current-starter group replacement keeps four current starters" do
+    %{event: event, round: round, admin: admin} = setup_round!()
+    manager = create_staff_user!()
+    assign_role!(admin, event, manager, :competition_manager)
+    {:ok, group} = Competition.create_playing_group(event.id, round.id, actor: admin)
+
+    entries =
+      for _ <- 1..4 do
+        player = create_player!()
+
+        {:ok, entry} =
+          Competition.add_round_entry(event.id, round.id, player.id, actor: admin)
+
+        {:ok, entry} =
+          AssignEntryToGroup.run(
+            admin,
+            event.id,
+            round.id,
+            entry.id,
+            group.id
+          )
+
+        entry
+      end
+
+    replacement_player = create_player!()
+    [to_replace | _rest] = entries
+
+    assert {:ok, %{original: marked, replacement: new_entry}} =
+             ReplaceRoundEntry.run(
+               manager,
+               event.id,
+               round.id,
+               to_replace.id,
+               replacement_player.id
+             )
+
+    assert marked.playing_group_id == group.id
+    assert new_entry.playing_group_id == group.id
+
+    assert current_starting_participant_count(group.id) == 4
+    assert round_entry_count(round.id) == 5
+  end
+
   test "replace_before_start authorization and guardrails" do
     %{event: event, round: round, admin: admin, player: player} = setup_round!()
     manager = create_staff_user!()
@@ -635,6 +739,16 @@ defmodule GolfScoring.Competition.RoundEntryTest do
       Repo.query!("SELECT count(*) FROM round_entries WHERE round_id = $1::uuid", [
         Ecto.UUID.dump!(round_id)
       ]).rows
+
+    count
+  end
+
+  defp current_starting_participant_count(group_id) do
+    [[count]] =
+      Repo.query!(
+        StartingParticipant.count_starters_in_group_sql(),
+        [Ecto.UUID.dump!(group_id)]
+      ).rows
 
     count
   end

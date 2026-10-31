@@ -162,6 +162,7 @@ defmodule GolfScoring.Competition.Round do
 
     has_many :round_tee_profile_snapshots, GolfScoring.Competition.RoundTeeProfileSnapshot
     has_many :round_entries, GolfScoring.Competition.RoundEntry
+    has_many :playing_groups, GolfScoring.Competition.PlayingGroup
   end
 
   identities do

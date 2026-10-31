@@ -15,12 +15,18 @@ defmodule GolfScoring.Competition.RoundEntry do
       reference :round, on_delete: :restrict, match_with: [event_id: :event_id]
       reference :player, on_delete: :restrict
       reference :checked_in_by_staff_user, on_delete: :restrict
+
+      reference :playing_group,
+        on_delete: :restrict,
+        match_with: [round_id: :round_id],
+        name: "round_entries_playing_group_same_round_fkey"
     end
 
     custom_indexes do
       index [:round_id, :registration_status]
       index [:round_id, :participation_status]
       index [:event_id]
+      index [:round_id, :playing_group_id], name: "round_entries_round_id_playing_group_id_index"
     end
 
     check_constraints do
@@ -89,9 +95,15 @@ defmodule GolfScoring.Competition.RoundEntry do
 
     create :create_replacement_entry_internal do
       public? false
-      accept [:event_id, :round_id, :player_id]
+      accept [:event_id, :round_id, :player_id, :playing_group_id]
       transaction? false
       change GolfScoring.Competition.Changes.CreateReplacementEntryInternal
+    end
+
+    update :assign_playing_group_internal do
+      public? false
+      accept [:playing_group_id]
+      require_atomic? false
     end
   end
 
@@ -164,6 +176,12 @@ defmodule GolfScoring.Competition.RoundEntry do
     end
 
     belongs_to :checked_in_by_staff_user, GolfScoring.Accounts.StaffUser do
+      allow_nil? true
+      public? false
+      attribute_public? false
+    end
+
+    belongs_to :playing_group, GolfScoring.Competition.PlayingGroup do
       allow_nil? true
       public? false
       attribute_public? false
