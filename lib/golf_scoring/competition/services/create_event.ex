@@ -22,7 +22,6 @@ defmodule GolfScoring.Competition.Services.CreateEvent do
       try do
         Repo.transaction(fn ->
           with :ok <- lock_and_authorize_actor(actor_id),
-               :ok <- synchronize_test_pause(:after_actor_lock),
                {:ok, event} <- create_event(),
                {:ok, _assignment} <- create_initial_assignment(event, actor),
                :ok <- record_audit(event, actor, safe_context) do
@@ -57,29 +56,6 @@ defmodule GolfScoring.Competition.Services.CreateEvent do
       [["active", true]] -> :ok
       _ -> {:error, :forbidden}
     end
-  rescue
-    _error -> {:error, :forbidden}
-  end
-
-  defp synchronize_test_pause(:after_actor_lock) do
-    case Process.get(:gls13_create_event_pause_parent) do
-      nil ->
-        :ok
-
-      parent when is_pid(parent) ->
-        send(parent, {:gls13_create_event_paused, database_backend_pid()})
-
-        receive do
-          :gls13_create_event_continue -> :ok
-        after
-          15_000 -> raise "create event test pause timeout"
-        end
-    end
-  end
-
-  defp database_backend_pid do
-    [[pid]] = Repo.query!("SELECT pg_backend_pid()").rows
-    pid
   end
 
   defp create_event do

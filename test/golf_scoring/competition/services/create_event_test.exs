@@ -13,6 +13,8 @@ defmodule GolfScoring.Competition.Services.CreateEventTest do
   require Ash.Query
 
   @password "GLS-13 synthetic staff passphrase 2026"
+  @event_barrier_namespace 0x47535331
+  @event_barrier_identity 13
 
   setup do
     owner = Sandbox.start_owner!(Repo, shared: true)
@@ -166,25 +168,64 @@ defmodule GolfScoring.Competition.Services.CreateEventTest do
 
   @tag :real_concurrency
   test "blocks concurrent SYSTEM_ADMIN revocation until CreateEvent commits" do
+    Sandbox.unboxed_run(Repo, fn ->
+      drop_event_insert_barrier!()
+      purge_gls13_unboxed_staff!()
+      install_event_insert_barrier!()
+    end)
+
+    on_exit(fn ->
+      Sandbox.unboxed_run(Repo, fn -> drop_event_insert_barrier!() end)
+    end)
+
     :ok = Sandbox.mode(Repo, :auto)
     Process.put(:gls13_concurrency_cleanup, {nil, nil, nil})
 
     try do
-      creator = create_system_admin!()
-      other = create_system_admin!()
+      {creator, other} =
+        Sandbox.unboxed_run(Repo, fn ->
+          {create_system_admin!(), create_system_admin!()}
+        end)
+
       Process.put(:gls13_concurrency_cleanup, {nil, creator.id, other.id})
       parent = self()
 
+      barrier_conn = start_barrier_connection!()
+
+      barrier_task =
+        Task.async(fn ->
+          Postgrex.query!(barrier_conn, "SELECT pg_advisory_lock($1, $2)", [
+            @event_barrier_namespace,
+            @event_barrier_identity
+          ])
+
+          send(parent, {:gls13_barrier_held, database_backend_pid(barrier_conn)})
+
+          receive do
+            :gls13_release_event_barrier -> :ok
+          after
+            15_000 -> raise "GLS-13 event insert barrier timeout"
+          end
+
+          Postgrex.query!(barrier_conn, "SELECT pg_advisory_unlock($1, $2)", [
+            @event_barrier_namespace,
+            @event_barrier_identity
+          ])
+
+          GenServer.stop(barrier_conn)
+        end)
+
+      assert_receive {:gls13_barrier_held, _barrier_pid}, 10_000
+
       create_task =
         Task.async(fn ->
-          Process.put(:gls13_create_event_pause_parent, parent)
-
           Sandbox.unboxed_run(Repo, fn ->
             CreateEvent.create(creator, %{"source" => "concurrency"})
           end)
         end)
 
-      assert_receive {:gls13_create_event_paused, create_backend_pid}, 10_000
+      create_backend_pid =
+        await_advisory_lock_waiter!(@event_barrier_namespace, @event_barrier_identity, 10_000)
 
       revoke_task =
         Task.async(fn ->
@@ -197,11 +238,13 @@ defmodule GolfScoring.Competition.Services.CreateEventTest do
       assert_receive {:gls13_revoke_backend, revoke_backend_pid}, 10_000
       assert await_blocked_by!(revoke_backend_pid, create_backend_pid)
 
-      send(create_task.pid, :gls13_create_event_continue)
+      send(barrier_task.pid, :gls13_release_event_barrier)
 
       assert {:ok, %{event: event}} = Task.await(create_task, 15_000)
       Process.put(:gls13_concurrency_cleanup, {event.id, creator.id, other.id})
+
       assert {:ok, revoked} = Task.await(revoke_task, 15_000)
+      assert Task.await(barrier_task, 15_000) == :ok
       assert revoked.system_admin == false
       refute Repo.get!(StaffUser, creator.id).system_admin
       assert event.state == :draft
@@ -211,6 +254,14 @@ defmodule GolfScoring.Competition.Services.CreateEventTest do
 
       Process.delete(:gls13_concurrency_cleanup)
       cleanup_concurrency_fixtures!(event_id, creator_id, other_id)
+
+      Sandbox.unboxed_run(Repo, fn ->
+        [[remaining]] =
+          Repo.query!("SELECT count(*) FROM staff_users WHERE email LIKE 'gls13-%@example.com'").rows
+
+        assert remaining == 0
+      end)
+
       :ok = Sandbox.mode(Repo, :manual)
     end
   end
@@ -326,14 +377,87 @@ defmodule GolfScoring.Competition.Services.CreateEventTest do
     Repo.query!("DROP FUNCTION IF EXISTS gls13_reject_create_event_audit()")
   end
 
-  defp database_backend_pid do
-    [[pid]] = Repo.query!("SELECT pg_backend_pid()").rows
+  defp install_event_insert_barrier! do
+    Repo.query!("""
+    CREATE OR REPLACE FUNCTION gls13_wait_event_insert_barrier() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+    BEGIN
+      PERFORM pg_advisory_lock(1196643121, 13);
+      PERFORM pg_advisory_unlock(1196643121, 13);
+      RETURN NEW;
+    END;
+    $$
+    """)
+
+    Repo.query!("""
+    CREATE TRIGGER gls13_wait_event_insert_barrier
+    BEFORE INSERT ON events
+    FOR EACH ROW EXECUTE FUNCTION gls13_wait_event_insert_barrier()
+    """)
+  end
+
+  defp drop_event_insert_barrier! do
+    Repo.query!("DROP TRIGGER IF EXISTS gls13_wait_event_insert_barrier ON events")
+    Repo.query!("DROP FUNCTION IF EXISTS gls13_wait_event_insert_barrier()")
+  end
+
+  defp start_barrier_connection! do
+    config = Repo.config() |> Keyword.merge(pool: nil, pool_size: 1)
+
+    case Postgrex.start_link(config) do
+      {:ok, conn} -> conn
+      {:error, reason} -> flunk("failed to start GLS-13 barrier connection: #{inspect(reason)}")
+    end
+  end
+
+  defp database_backend_pid(conn \\ nil) do
+    query =
+      if conn do
+        Postgrex.query!(conn, "SELECT pg_backend_pid()", [])
+      else
+        Repo.query!("SELECT pg_backend_pid()")
+      end
+
+    [[pid]] = query.rows
     pid
   end
 
   defp await_blocked_by!(blocked_pid, blocker_pid) do
     deadline = System.monotonic_time(:millisecond) + 10_000
     do_await_blocked_by!(blocked_pid, blocker_pid, deadline)
+  end
+
+  defp await_advisory_lock_waiter!(namespace, identity, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_await_advisory_lock_waiter!(namespace, identity, deadline)
+  end
+
+  defp do_await_advisory_lock_waiter!(namespace, identity, deadline) do
+    case Sandbox.unboxed_run(Repo, fn ->
+           Repo.query!(
+             """
+             SELECT pid
+             FROM pg_locks
+             WHERE locktype = 'advisory'
+               AND classid = $1
+               AND objid = $2
+               AND NOT granted
+             LIMIT 1
+             """,
+             [namespace, identity]
+           ).rows
+         end) do
+      [[waiter_pid]] ->
+        waiter_pid
+
+      [] ->
+        if System.monotonic_time(:millisecond) > deadline do
+          flunk("expected a CreateEvent backend waiting on the GLS-13 event insert barrier")
+        else
+          Process.sleep(50)
+          do_await_advisory_lock_waiter!(namespace, identity, deadline)
+        end
+    end
   end
 
   defp do_await_blocked_by!(blocked_pid, blocker_pid, deadline) do
@@ -357,33 +481,104 @@ defmodule GolfScoring.Competition.Services.CreateEventTest do
   end
 
   defp cleanup_concurrency_fixtures!(event_id, creator_id, other_id) do
+    staff_ids = Enum.reject([creator_id, other_id], &is_nil/1)
+
     Sandbox.unboxed_run(Repo, fn ->
       if event_id do
+        event_uuid = uuid_param(event_id)
+
         Repo.query!(
           "DELETE FROM audit_events WHERE target_type = 'event' AND target_id = $1::uuid",
-          [Ecto.UUID.dump!(event_id)]
+          [event_uuid]
         )
 
         Repo.query!(
           "DELETE FROM event_staff_assignments WHERE event_id = $1::uuid",
-          [Ecto.UUID.dump!(event_id)]
+          [event_uuid]
         )
 
-        Repo.query!("DELETE FROM events WHERE id = $1::uuid", [Ecto.UUID.dump!(event_id)])
+        Repo.query!("DELETE FROM events WHERE id = $1::uuid", [event_uuid])
       end
 
-      for staff_id <- Enum.reject([creator_id, other_id], &is_nil/1) do
-        Repo.query!("DELETE FROM audit_events WHERE actor_staff_user_id = $1::uuid", [
-          Ecto.UUID.dump!(staff_id)
-        ])
+      Enum.each(staff_ids, fn staff_id ->
+        staff_uuid = uuid_param(staff_id)
 
         Repo.query!(
-          "DELETE FROM audit_events WHERE target_type = 'staff_user' AND target_id = $1::uuid",
-          [Ecto.UUID.dump!(staff_id)]
+          "DELETE FROM audit_events WHERE actor_staff_user_id = $1::uuid OR target_id = $1::uuid",
+          [staff_uuid]
         )
 
-        Repo.query!("DELETE FROM staff_users WHERE id = $1::uuid", [Ecto.UUID.dump!(staff_id)])
-      end
+        Repo.query!(
+          "DELETE FROM event_staff_assignments WHERE staff_user_id = $1::uuid",
+          [staff_uuid]
+        )
+
+        Repo.query!("DELETE FROM staff_users WHERE id = $1::uuid", [staff_uuid])
+      end)
+
+      purge_gls13_unboxed_staff!()
     end)
+  end
+
+  defp uuid_param(id) when is_binary(id) do
+    case Ecto.UUID.cast(id) do
+      {:ok, string} -> Ecto.UUID.dump!(string)
+      :error -> id
+    end
+  end
+
+  defp uuid_param(id), do: Ecto.UUID.dump!(id)
+
+  defp purge_gls13_unboxed_staff! do
+    staff_ids =
+      Repo.query!("SELECT id FROM staff_users WHERE email LIKE 'gls13-%@example.com'").rows
+      |> Enum.map(&hd/1)
+
+    Enum.each(staff_ids, fn staff_id ->
+      staff_uuid = uuid_param(staff_id)
+
+      Repo.query!(
+        "DELETE FROM audit_events WHERE actor_staff_user_id = $1::uuid OR target_id = $1::uuid",
+        [staff_uuid]
+      )
+
+      Repo.query!(
+        "DELETE FROM event_staff_assignments WHERE staff_user_id = $1::uuid",
+        [staff_uuid]
+      )
+
+      Repo.query!("DELETE FROM staff_users WHERE id = $1::uuid", [staff_uuid])
+    end)
+
+    event_ids =
+      Repo.query!("""
+      SELECT id
+      FROM events
+      WHERE id IN (
+        SELECT target_id
+        FROM audit_events
+        WHERE action = 'event_created'
+          AND context->>'source' = 'concurrency'
+      )
+      """).rows
+      |> Enum.map(&hd/1)
+
+    Enum.each(event_ids, fn event_id ->
+      event_uuid = uuid_param(event_id)
+
+      Repo.query!(
+        "DELETE FROM audit_events WHERE target_type = 'event' AND target_id = $1::uuid",
+        [event_uuid]
+      )
+
+      Repo.query!(
+        "DELETE FROM event_staff_assignments WHERE event_id = $1::uuid",
+        [event_uuid]
+      )
+
+      Repo.query!("DELETE FROM events WHERE id = $1::uuid", [event_uuid])
+    end)
+
+    :ok
   end
 end
