@@ -6,6 +6,7 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
   alias GolfScoring.Accounts.EventAuthorityLock
   alias GolfScoring.Competition.Player
   alias GolfScoring.Competition.RoundEntry
+  alias GolfScoring.Competition.CompetitionSideMembership
   alias GolfScoring.Repo
 
   @manager_roles [:event_admin, :competition_manager]
@@ -25,6 +26,8 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
            :ok <- round_accepts_replacement(round),
            {:ok, playing_group_id} <- fetch_playing_group_id(original_entry_id, round_id),
            :ok <- lock_playing_group_if_present(playing_group_id),
+           {:ok, side_memberships} <- fetch_side_memberships(original_entry_id),
+           :ok <- lock_side_membership_scope(side_memberships),
            {:ok, original} <- lock_round_entry(original_entry_id),
            :ok <- original_belongs_to_round(original, round_id, event_id),
            :ok <- verify_group_unchanged(original, playing_group_id),
@@ -32,7 +35,8 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
            :ok <- replacement_player_exists(replacement_player_id),
            :ok <- replacement_available(round_id, replacement_player_id),
            {:ok, marked} <- mark_original_replaced(original.id),
-           {:ok, replacement} <- create_replacement(marked, replacement_player_id) do
+           {:ok, replacement} <- create_replacement(marked, replacement_player_id),
+           :ok <- copy_side_memberships(side_memberships, replacement) do
         %{original: marked, replacement: replacement}
       else
         {:error, reason} -> Repo.rollback(reason)
@@ -210,6 +214,105 @@ defmodule GolfScoring.Competition.Services.ReplaceRoundEntry do
       {:ok, entry} -> {:ok, entry}
       {:error, error} -> {:error, error}
     end
+  end
+
+  defp fetch_side_memberships(original_entry_id) do
+    rows =
+      Repo.query!(
+        """
+        SELECT round_competition_id::text, competition_side_id::text, round_id::text
+        FROM competition_side_memberships
+        WHERE round_entry_id = $1::uuid
+        ORDER BY round_competition_id, competition_side_id
+        """,
+        [Ecto.UUID.dump!(original_entry_id)]
+      ).rows
+
+    memberships =
+      Enum.map(rows, fn [round_competition_id, competition_side_id, round_id] ->
+        %{
+          round_competition_id: Ecto.UUID.cast!(round_competition_id),
+          competition_side_id: Ecto.UUID.cast!(competition_side_id),
+          round_id: Ecto.UUID.cast!(round_id)
+        }
+      end)
+
+    {:ok, memberships}
+  end
+
+  defp lock_side_membership_scope([]), do: :ok
+
+  defp lock_side_membership_scope(memberships) do
+    competition_ids =
+      memberships
+      |> Enum.map(& &1.round_competition_id)
+      |> Enum.uniq()
+      |> Enum.sort_by(&Ecto.UUID.dump!/1)
+
+    side_ids =
+      memberships
+      |> Enum.map(& &1.competition_side_id)
+      |> Enum.uniq()
+      |> Enum.sort_by(&Ecto.UUID.dump!/1)
+
+    with :ok <- lock_round_competitions(competition_ids),
+         :ok <- lock_competition_sides(side_ids) do
+      :ok
+    end
+  end
+
+  defp lock_round_competitions(competition_ids) do
+    for competition_id <- competition_ids do
+      case Repo.query!(
+             "SELECT id::text FROM round_competitions WHERE id = $1::uuid FOR UPDATE",
+             [Ecto.UUID.dump!(competition_id)]
+           ).rows do
+        [[_id]] -> :ok
+        [] -> throw({:error, :round_competition_not_found})
+      end
+    end
+
+    :ok
+  catch
+    {:error, reason} -> {:error, reason}
+  end
+
+  defp lock_competition_sides(side_ids) do
+    for side_id <- side_ids do
+      case Repo.query!(
+             "SELECT id::text FROM competition_sides WHERE id = $1::uuid FOR UPDATE",
+             [Ecto.UUID.dump!(side_id)]
+           ).rows do
+        [[_id]] -> :ok
+        [] -> throw({:error, :competition_side_not_found})
+      end
+    end
+
+    :ok
+  catch
+    {:error, reason} -> {:error, reason}
+  end
+
+  defp copy_side_memberships([], _replacement), do: :ok
+
+  defp copy_side_memberships(memberships, replacement) do
+    for membership <- memberships do
+      case CompetitionSideMembership
+           |> Changeset.for_create(:create_internal, %{
+             round_competition_id: membership.round_competition_id,
+             competition_side_id: membership.competition_side_id,
+             round_entry_id: replacement.id,
+             round_id: membership.round_id
+           })
+           |> Ash.create(authorize?: false) do
+        {:ok, _} -> :ok
+        {:error, error} -> throw({:error, error})
+      end
+    end
+
+    :ok
+  catch
+    {:error, reason} -> {:error, reason}
   end
 
   defp normalize_result({:ok, result}), do: {:ok, result}

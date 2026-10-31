@@ -1,0 +1,309 @@
+defmodule GolfScoring.Competition.Services.SetSideMembership do
+  @moduledoc false
+
+  require Ash.Query
+
+  alias Ash.Changeset
+  alias GolfScoring.Accounts.Checks.ActiveEventRole
+  alias GolfScoring.Accounts.EventAuthorityLock
+  alias GolfScoring.Audit
+  alias GolfScoring.Competition.CompetitionSideMembership
+  alias GolfScoring.Competition.FourBallStablefordV1SidePolicy
+  alias GolfScoring.Repo
+
+  @manager_roles [:event_admin, :competition_manager]
+
+  @spec run(map(), Ecto.UUID.t(), Ecto.UUID.t(), Ecto.UUID.t(), Ecto.UUID.t(), [Ecto.UUID.t()]) ::
+          {:ok, %{memberships: [CompetitionSideMembership.t()]}} | {:error, term()}
+  def run(actor, event_id, round_id, round_competition_id, competition_side_id, round_entry_ids)
+      when is_map(actor) and is_list(round_entry_ids) do
+    actor_id = Map.get(actor, :id)
+    round_entry_ids = normalize_entry_ids(round_entry_ids)
+
+    Repo.transaction(fn ->
+      with {:ok, _scope} <- EventAuthorityLock.lock_scope!(event_id, [actor_id]),
+           :ok <- authorize(actor_id, event_id),
+           {:ok, round} <- lock_round(round_id),
+           :ok <- round_belongs_to_event(round, event_id),
+           :ok <- round_accepts_membership(round),
+           {:ok, competition} <- lock_round_competition(round_competition_id, round_id),
+           {:ok, side} <-
+             lock_competition_side(competition_side_id, round_competition_id, round_id),
+           {:ok, entries} <- lock_round_entries(round_entry_ids, round_id, event_id),
+           :ok <- validate_scope(entries, round_id),
+           :ok <- validate_policy(competition, side, entries),
+           :ok <- remove_existing_memberships(round_competition_id, round_entry_ids),
+           :ok <- replace_side_memberships(round, competition, side, round_entry_ids),
+           :ok <- write_audit_if_ready(actor_id, round),
+           {:ok, memberships} <- load_side_memberships(competition_side_id) do
+        %{memberships: memberships}
+      else
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+    |> normalize_result()
+  end
+
+  def run(_actor, _event_id, _round_id, _round_competition_id, _competition_side_id, _entry_ids),
+    do: {:error, :invalid_input}
+
+  defp authorize(actor_id, event_id) do
+    if ActiveEventRole.authorized?(actor_id, event_id, @manager_roles) do
+      :ok
+    else
+      {:error, :forbidden}
+    end
+  end
+
+  defp normalize_entry_ids(ids) do
+    ids
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Enum.sort_by(&Ecto.UUID.dump!/1)
+  end
+
+  defp lock_round(round_id) do
+    case Repo.query!(
+           "SELECT id::text, event_id::text, state FROM rounds WHERE id = $1::uuid FOR UPDATE",
+           [Ecto.UUID.dump!(round_id)]
+         ).rows do
+      [[id, event_id, state]] ->
+        {:ok,
+         %{
+           id: Ecto.UUID.cast!(id),
+           event_id: Ecto.UUID.cast!(event_id),
+           state: String.to_existing_atom(state)
+         }}
+
+      [] ->
+        {:error, :round_not_found}
+    end
+  end
+
+  defp round_belongs_to_event(%{event_id: round_event_id}, event_id) do
+    if round_event_id == event_id, do: :ok, else: {:error, :event_mismatch}
+  end
+
+  defp round_accepts_membership(%{state: state}) when state in [:draft, :ready], do: :ok
+
+  defp round_accepts_membership(%{state: state}),
+    do: {:error, {:invalid_round_state, state}}
+
+  defp lock_round_competition(round_competition_id, round_id) do
+    case Repo.query!(
+           """
+           SELECT id::text, scoring_policy_identifier, solo_sides_permitted
+           FROM round_competitions
+           WHERE id = $1::uuid AND round_id = $2::uuid
+           FOR UPDATE
+           """,
+           [Ecto.UUID.dump!(round_competition_id), Ecto.UUID.dump!(round_id)]
+         ).rows do
+      [[id, policy, solo?]] ->
+        {:ok,
+         %{
+           id: Ecto.UUID.cast!(id),
+           scoring_policy_identifier: policy,
+           solo_sides_permitted: solo? == true
+         }}
+
+      [] ->
+        {:error, :round_competition_not_found}
+    end
+  end
+
+  defp lock_competition_side(competition_side_id, round_competition_id, round_id) do
+    case Repo.query!(
+           """
+           SELECT id::text, formation
+           FROM competition_sides
+           WHERE id = $1::uuid
+             AND round_competition_id = $2::uuid
+             AND round_id = $3::uuid
+           FOR UPDATE
+           """,
+           [
+             Ecto.UUID.dump!(competition_side_id),
+             Ecto.UUID.dump!(round_competition_id),
+             Ecto.UUID.dump!(round_id)
+           ]
+         ).rows do
+      [[id, formation]] ->
+        {:ok, %{id: Ecto.UUID.cast!(id), formation: String.to_existing_atom(formation)}}
+
+      [] ->
+        {:error, :competition_side_not_found}
+    end
+  end
+
+  defp lock_round_entries(round_entry_ids, round_id, event_id) do
+    if round_entry_ids == [] do
+      {:ok, []}
+    else
+      dumped_ids = Enum.map(round_entry_ids, &Ecto.UUID.dump!/1)
+
+      rows =
+        Repo.query!(
+          """
+          SELECT id::text, event_id::text, round_id::text,
+                 registration_status, participation_status
+          FROM round_entries
+          WHERE round_id = $1::uuid
+            AND id = ANY($2::uuid[])
+          ORDER BY id
+          FOR UPDATE
+          """,
+          [Ecto.UUID.dump!(round_id), dumped_ids]
+        ).rows
+
+      if length(rows) != length(round_entry_ids) do
+        {:error, :round_entry_not_found}
+      else
+        entries =
+          Enum.map(rows, fn [id, eid, rid, reg, part] ->
+            %{
+              id: Ecto.UUID.cast!(id),
+              event_id: Ecto.UUID.cast!(eid),
+              round_id: Ecto.UUID.cast!(rid),
+              registration_status: String.to_existing_atom(reg),
+              participation_status: String.to_existing_atom(part)
+            }
+          end)
+
+        if Enum.all?(entries, &(&1.event_id == event_id)),
+          do: {:ok, entries},
+          else: {:error, :event_mismatch}
+      end
+    end
+  end
+
+  defp validate_scope(entries, round_id) do
+    if Enum.all?(entries, &(&1.round_id == round_id)),
+      do: :ok,
+      else: {:error, :round_entry_mismatch}
+  end
+
+  defp validate_policy(competition, side, entries) do
+    case competition.scoring_policy_identifier do
+      "four_ball_stableford_v1" ->
+        FourBallStablefordV1SidePolicy.validate_membership(competition, side.formation, entries)
+
+      _ ->
+        {:error, :unsupported_scoring_policy}
+    end
+  end
+
+  defp remove_existing_memberships(round_competition_id, round_entry_ids) do
+    for entry_id <- round_entry_ids do
+      memberships =
+        CompetitionSideMembership
+        |> Ash.Query.filter(
+          round_competition_id == ^round_competition_id and round_entry_id == ^entry_id
+        )
+        |> Ash.read!(authorize?: false)
+
+      for membership <- memberships do
+        case Ash.destroy(membership, action: :destroy_internal, authorize?: false) do
+          :ok -> :ok
+          {:ok, _} -> :ok
+          {:error, error} -> throw({:error, error})
+        end
+      end
+    end
+
+    :ok
+  catch
+    {:error, reason} -> {:error, reason}
+  end
+
+  defp replace_side_memberships(round, competition, side, round_entry_ids) do
+    _ =
+      CompetitionSideMembership
+      |> Ash.Query.filter(competition_side_id == ^side.id)
+      |> Ash.read!(authorize?: false)
+      |> Enum.each(fn membership ->
+        case Ash.destroy(membership, action: :destroy_internal, authorize?: false) do
+          :ok -> :ok
+          {:ok, _} -> :ok
+          {:error, error} -> throw({:error, error})
+        end
+      end)
+
+    for entry_id <- round_entry_ids do
+      case create_membership!(round, competition, side, entry_id) do
+        :ok -> :ok
+        {:error, reason} -> throw({:error, reason})
+      end
+    end
+
+    :ok
+  catch
+    {:error, reason} -> {:error, reason}
+  end
+
+  defp create_membership!(round, competition, side, entry_id) do
+    case CompetitionSideMembership
+         |> Changeset.for_create(:create_internal, %{
+           round_competition_id: competition.id,
+           competition_side_id: side.id,
+           round_entry_id: entry_id,
+           round_id: round.id
+         })
+         |> Ash.create(authorize?: false) do
+      {:ok, _} ->
+        :ok
+
+      {:error, error} ->
+        if unique_violation?(error) do
+          {:error, :entry_already_in_competition}
+        else
+          {:error, :membership_create_failed}
+        end
+    end
+  end
+
+  defp unique_violation?(%Ash.Error.Unknown{errors: errors}) do
+    Enum.any?(errors, fn
+      %{caused_by: %Postgrex.Error{postgres: %{code: :unique_violation}}} -> true
+      _ -> false
+    end)
+  end
+
+  defp unique_violation?(%Postgrex.Error{postgres: %{code: :unique_violation}}), do: true
+  defp unique_violation?(_), do: false
+
+  defp load_side_memberships(competition_side_id) do
+    memberships =
+      CompetitionSideMembership
+      |> Ash.Query.filter(competition_side_id == ^competition_side_id)
+      |> Ash.read(authorize?: false)
+
+    case memberships do
+      {:ok, rows} -> {:ok, rows}
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp write_audit_if_ready(actor_id, %{state: :ready, id: round_id}) do
+    case Audit.record_staff_event(
+           %{
+             actor_staff_user_id: actor_id,
+             action: "set_side_membership",
+             target_type: "Round",
+             target_id: round_id,
+             context: %{round_id: round_id},
+             changes: %{operation: "set_side_membership"}
+           },
+           authorize?: false
+         ) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp write_audit_if_ready(_actor_id, _round), do: :ok
+
+  defp normalize_result({:ok, result}), do: {:ok, result}
+  defp normalize_result({:error, reason}), do: {:error, reason}
+  defp normalize_result({:error, :rollback, reason}), do: {:error, reason}
+end

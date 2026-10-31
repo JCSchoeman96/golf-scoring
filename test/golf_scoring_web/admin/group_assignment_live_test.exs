@@ -40,6 +40,23 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLiveTest do
     assert has_element?(manager_view, "#create-playing-group-button")
   end
 
+  test "shows separate competition side section from physical playing groups", %{conn: conn} do
+    setup = seed_group_setup!()
+    conn = authenticate(conn, setup.admin.email)
+
+    {:ok, view, _html} =
+      live(conn, ~p"/admin/events/#{setup.event.id}/rounds/#{setup.round.id}/groups")
+
+    assert has_element?(view, "#competition-sides-section")
+    assert has_element?(view, "#physical-playing-groups-section")
+    assert has_element?(view, "#create-playing-group-button")
+    refute has_element?(view, "#create-competition-side-partnership")
+
+    render_click(element(view, "#configure-round-competition-button"))
+    assert has_element?(view, "#create-competition-side-partnership")
+    assert has_element?(view, "#round-competition-summary")
+  end
+
   test "registration staff is denied", %{conn: conn} do
     setup = seed_group_setup!()
     staff = create_staff_user!()

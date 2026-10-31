@@ -42,5 +42,53 @@ defmodule GolfScoring.Competition do
       define :create_playing_group, action: :create_playing_group, args: [:event_id, :round_id]
       define :get_playing_group_by_id, action: :read, get_by: [:id]
     end
+
+    resource GolfScoring.Competition.RoundCompetition do
+      define :get_round_competition_by_id, action: :read, get_by: [:id]
+    end
+
+    resource GolfScoring.Competition.CompetitionSide do
+      define :get_competition_side_by_id, action: :read, get_by: [:id]
+    end
+
+    resource GolfScoring.Competition.CompetitionSideMembership
+    resource GolfScoring.Competition.CompetitionSideResult
+  end
+
+  def configure_round_competition(actor, event_id, round_id, attrs) do
+    GolfScoring.Competition.Services.ConfigureRoundCompetition.run(
+      actor,
+      event_id,
+      round_id,
+      attrs
+    )
+  end
+
+  def create_competition_side(actor, event_id, round_id, round_competition_id, formation) do
+    GolfScoring.Competition.Services.CreateCompetitionSide.run(
+      actor,
+      event_id,
+      round_id,
+      round_competition_id,
+      formation
+    )
+  end
+
+  def set_side_membership(
+        actor,
+        event_id,
+        round_id,
+        round_competition_id,
+        competition_side_id,
+        round_entry_ids
+      ) do
+    GolfScoring.Competition.Services.SetSideMembership.run(
+      actor,
+      event_id,
+      round_id,
+      round_competition_id,
+      competition_side_id,
+      round_entry_ids
+    )
   end
 end
