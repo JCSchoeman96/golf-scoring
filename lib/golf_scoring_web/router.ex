@@ -26,6 +26,10 @@ defmodule GolfScoringWeb.Router do
     plug GolfScoringWeb.Admin.RequireStaff
   end
 
+  pipeline :require_player_access do
+    plug GolfScoringWeb.Player.RequirePlayerAccess
+  end
+
   pipeline :api do
     plug :accepts, ["json"]
   end
@@ -38,6 +42,18 @@ defmodule GolfScoringWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+  end
+
+  scope "/player", GolfScoringWeb.Player do
+    pipe_through :browser
+
+    get "/access", AccessController, :exchange
+  end
+
+  scope "/player", GolfScoringWeb.Player do
+    pipe_through [:browser, :require_player_access]
+
+    get "/", ProtectedController, :show
   end
 
   scope "/admin" do
