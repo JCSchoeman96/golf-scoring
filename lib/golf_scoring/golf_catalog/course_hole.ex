@@ -70,5 +70,6 @@ defmodule GolfScoring.GolfCatalog.CourseHole do
 
   identities do
     identity :unique_hole_per_course, [:course_id, :hole_number]
+    identity :unique_id_per_course, [:id, :course_id]
   end
 end
