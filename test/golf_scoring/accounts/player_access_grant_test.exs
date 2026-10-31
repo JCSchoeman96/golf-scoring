@@ -9,6 +9,7 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
   alias Ecto.Adapters.SQL.Sandbox
   alias GolfScoring.Accounts
   alias GolfScoring.Accounts.PlayerAccessGrant
+  alias GolfScoring.Accounts.PlayerAccessExchange
   alias GolfScoring.Accounts.PlayerAccessToken
   alias GolfScoring.Accounts.Services.IssuePlayerAccess
   alias GolfScoring.Accounts.Services.ReissuePlayerAccess

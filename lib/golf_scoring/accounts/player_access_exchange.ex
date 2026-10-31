@@ -18,7 +18,6 @@ defmodule GolfScoring.Accounts.PlayerAccessExchange do
       case PlayerAccessGrantGuard.find_usable_active_by_digest(Repo, digest) do
         {:ok, grant} -> grant
         {:error, :invalid_credentials} -> Repo.rollback(:invalid_credentials)
-        {:error, reason} -> Repo.rollback(reason)
       end
     end)
     |> case do
