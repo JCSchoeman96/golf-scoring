@@ -160,18 +160,7 @@ defmodule GolfScoring.Competition.Services.AssignEntryToGroup do
   end
 
   defp validate_capacity(group_id, entry) do
-    [[count]] =
-      Repo.query!(
-        """
-        SELECT count(*)::int
-        FROM round_entries
-        WHERE playing_group_id = $1::uuid
-          AND id <> $2::uuid
-          AND registration_status IN ('expected', 'checked_in')
-          AND participation_status = 'not_started'
-        """,
-        [Ecto.UUID.dump!(group_id), Ecto.UUID.dump!(entry.id)]
-      ).rows
+    count = StartingParticipant.count_starters_in_group_excluding_entry(Repo, group_id, entry.id)
 
     if count + 1 > PlayingGroupReadiness.setup_capacity_max() do
       {:error, :group_capacity_exceeded}

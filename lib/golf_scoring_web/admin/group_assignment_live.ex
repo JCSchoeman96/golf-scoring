@@ -14,6 +14,7 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
   alias GolfScoring.Competition.RoundHole
   alias GolfScoring.Competition.Services.AssignEntryToGroup
   alias GolfScoring.Competition.Services.AssignPlayingGroupStart
+  alias GolfScoring.Competition.StartingParticipant
   alias GolfScoring.Competition.StartingPositionLabel
   alias GolfScoring.Repo
   alias GolfScoringWeb.Admin.InputParsing
@@ -353,30 +354,7 @@ defmodule GolfScoringWeb.Admin.GroupAssignmentLive do
   end
 
   defp list_eligible_current_starters(round_id) do
-    Repo.query!(
-      """
-      SELECT id::text, playing_group_id::text
-      FROM round_entries
-      WHERE round_id = $1::uuid
-        AND registration_status IN ('expected', 'checked_in')
-        AND participation_status = 'not_started'
-      ORDER BY id
-      """,
-      [Ecto.UUID.dump!(round_id)]
-    ).rows
-    |> Enum.map(fn [id, group_id] ->
-      %{
-        id: id,
-        playing_group_id: cast_optional_uuid(group_id)
-      }
-    end)
-  end
-
-  defp cast_optional_uuid(nil), do: nil
-
-  defp cast_optional_uuid(value) do
-    {:ok, uuid} = Ecto.UUID.cast(value)
-    uuid
+    StartingParticipant.list_current_starters_in_round(Repo, round_id)
   end
 
   defp list_round_holes(round_id) do
