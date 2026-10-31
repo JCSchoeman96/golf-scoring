@@ -20,18 +20,72 @@ defmodule GolfScoring.Competition.RoundHoleTest do
     :ok
   end
 
-  test "PostgreSQL enforces route uniqueness, positive orders, state, and cross-course composite keys" do
+  test "PostgreSQL composite Round/Course FK rejects mismatched course_id on an empty route" do
     event = create_event!()
     admin = create_event_admin!(event)
     course_a = create_course!(event, admin, "A")
     course_b = create_course!(event, admin, "B")
+    [hole_b | _] = create_eighteen_holes!(event, admin, course_b)
+
+    {:ok, round_a} = Competition.create_round(event.id, course_a.id, actor: admin)
+
+    round_course_fk_error =
+      assert_raise Postgrex.Error, fn ->
+        Repo.query!(
+          """
+          INSERT INTO round_holes (round_id, course_hole_id, course_id, play_order, display_hole_number)
+          VALUES ($1::uuid, $2::uuid, $3::uuid, 40, 1)
+          """,
+          [
+            Ecto.UUID.dump!(round_a.id),
+            Ecto.UUID.dump!(hole_b.id),
+            Ecto.UUID.dump!(course_b.id)
+          ]
+        )
+      end
+
+    assert round_course_fk_error.postgres.code == :foreign_key_violation
+    assert round_course_fk_error.postgres.constraint == "round_holes_round_id_fkey"
+  end
+
+  test "PostgreSQL composite CourseHole/Course FK rejects mismatched course_id on an empty route" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course_a = create_course!(event, admin, "A")
+    course_b = create_course!(event, admin, "B")
+    [hole_b | _] = create_eighteen_holes!(event, admin, course_b)
+
+    {:ok, round_a} = Competition.create_round(event.id, course_a.id, actor: admin)
+
+    course_hole_fk_error =
+      assert_raise Postgrex.Error, fn ->
+        Repo.query!(
+          """
+          INSERT INTO round_holes (round_id, course_hole_id, course_id, play_order, display_hole_number)
+          VALUES ($1::uuid, $2::uuid, $3::uuid, 41, 1)
+          """,
+          [
+            Ecto.UUID.dump!(round_a.id),
+            Ecto.UUID.dump!(hole_b.id),
+            Ecto.UUID.dump!(course_a.id)
+          ]
+        )
+      end
+
+    assert course_hole_fk_error.postgres.code == :foreign_key_violation
+    assert course_hole_fk_error.postgres.constraint == "round_holes_course_hole_id_fkey"
+  end
+
+  test "PostgreSQL enforces route uniqueness, positive orders, and round state" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course_a = create_course!(event, admin, "A")
     holes_a = create_eighteen_holes!(event, admin, course_a)
-    hole_b = hd(create_eighteen_holes!(event, admin, course_b))
 
     {:ok, round} = Competition.create_round(event.id, course_a.id, actor: admin)
     {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes_a, & &1.id))
 
-    [[round_hole_id, course_hole_id, play_order]] =
+    [[_round_hole_id, course_hole_id, play_order]] =
       Repo.query!(
         "SELECT id::text, course_hole_id::text, play_order FROM round_holes WHERE round_id = $1::uuid LIMIT 1",
         [Ecto.UUID.dump!(round.id)]
@@ -55,6 +109,9 @@ defmodule GolfScoring.Competition.RoundHoleTest do
 
     assert duplicate_order_error.postgres.code == :unique_violation
 
+    assert duplicate_order_error.postgres.constraint ==
+             "round_holes_unique_play_order_per_round_index"
+
     duplicate_hole_error =
       assert_raise Postgrex.Error, fn ->
         Repo.query!(
@@ -72,39 +129,8 @@ defmodule GolfScoring.Competition.RoundHoleTest do
 
     assert duplicate_hole_error.postgres.code == :unique_violation
 
-    cross_course_error =
-      assert_raise Postgrex.Error, fn ->
-        Repo.query!(
-          """
-          INSERT INTO round_holes (round_id, course_hole_id, course_id, play_order, display_hole_number)
-          VALUES ($1::uuid, $2::uuid, $3::uuid, 98, 1)
-          """,
-          [
-            Ecto.UUID.dump!(round.id),
-            Ecto.UUID.dump!(hole_b.id),
-            Ecto.UUID.dump!(course_a.id)
-          ]
-        )
-      end
-
-    assert cross_course_error.postgres.code in [:foreign_key_violation, :check_violation]
-
-    lying_course_error =
-      assert_raise Postgrex.Error, fn ->
-        Repo.query!(
-          """
-          INSERT INTO round_holes (round_id, course_hole_id, course_id, play_order, display_hole_number)
-          VALUES ($1::uuid, $2::uuid, $3::uuid, 97, 1)
-          """,
-          [
-            Ecto.UUID.dump!(round.id),
-            Ecto.UUID.dump!(hd(holes_a).id),
-            Ecto.UUID.dump!(course_b.id)
-          ]
-        )
-      end
-
-    assert lying_course_error.postgres.code in [:foreign_key_violation, :unique_violation]
+    assert duplicate_hole_error.postgres.constraint ==
+             "round_holes_unique_course_hole_per_round_index"
 
     invalid_state_error =
       assert_raise Postgrex.Error, fn ->
@@ -136,8 +162,6 @@ defmodule GolfScoring.Competition.RoundHoleTest do
 
     assert invalid_play_order_error.postgres.constraint ==
              "round_holes_play_order_must_be_positive"
-
-    refute is_nil(round_hole_id)
   end
 
   defp create_event! do

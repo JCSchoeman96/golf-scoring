@@ -20,8 +20,6 @@ defmodule GolfScoring.Competition do
       define :cancel_round, action: :cancel_round
     end
 
-    resource GolfScoring.Competition.RoundHole do
-      define :list_round_route, action: :read_route
-    end
+    resource GolfScoring.Competition.RoundHole
   end
 end

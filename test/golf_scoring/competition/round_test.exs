@@ -3,9 +3,12 @@ defmodule GolfScoring.Competition.RoundTest do
 
   alias Ash.Resource.Info
   alias Ecto.Adapters.SQL.Sandbox
+  alias GolfScoring.Accounts
+  alias GolfScoring.Accounts.EventStaffAssignment
   alias GolfScoring.Competition
   alias GolfScoring.Competition.Event
   alias GolfScoring.Competition.Round
+  alias GolfScoring.Competition.RoundHole
   alias GolfScoring.Competition.Services.ConfigureRoundLayout
   alias GolfScoring.GolfCatalog
   alias GolfScoring.Repo
@@ -24,9 +27,12 @@ defmodule GolfScoring.Competition.RoundTest do
 
   test "Round is registered in Competition with guarded create_round" do
     assert Round in Ash.Domain.Info.resources(Competition)
+    assert RoundHole in Ash.Domain.Info.resources(Competition)
     assert Info.action(Round, :create_round)
     assert is_nil(Info.action(Round, :create))
     assert is_nil(Info.action(Round, :update))
+    assert is_nil(Info.action(RoundHole, :read_route))
+    refute function_exported?(Competition, :list_round_route, 1)
   end
 
   test "active Event Admin creates a draft Round for an active Course on a mutable Event" do
@@ -45,7 +51,6 @@ defmodule GolfScoring.Competition.RoundTest do
 
     assert length(route) == 18
     assert Enum.map(route, & &1.play_order) == Enum.to_list(1..18)
-    assert Enum.all?(route, fn row -> row.display_hole_number == row.play_order end)
   end
 
   test "create_round authorization matrix and state guardrails" do
@@ -117,10 +122,22 @@ defmodule GolfScoring.Competition.RoundTest do
     reversed = Enum.reverse(hole_ids)
     assert {:ok, reordered} = ConfigureRoundLayout.run(manager, round.id, reversed)
 
+    hole_18 = List.last(holes)
+
+    first =
+      reordered
+      |> Enum.sort_by(& &1.play_order)
+      |> hd()
+
+    assert first.play_order == 1
+    assert first.display_hole_number == 18
+    assert first.course_hole_id == hole_18.id
+
     id_by_course_hole = Map.new(route, fn row -> {row.course_hole_id, row.id} end)
 
     for row <- reordered do
       assert row.id == id_by_course_hole[row.course_hole_id]
+      refute row.play_order == row.display_hole_number
     end
 
     assert {:error, :duplicate_course_hole} =
@@ -225,6 +242,55 @@ defmodule GolfScoring.Competition.RoundTest do
     drop_round_audit_failure_trigger!()
   end
 
+  test "stale Event Admin struct cannot create_round after assignment revocation" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    replacement = create_event_admin!(event)
+    stale_admin = admin
+    course = create_course!(event, replacement)
+
+    assignment = active_assignment_record(event, admin)
+
+    assert {:ok, _revoked} =
+             Accounts.revoke_event_staff_role(assignment, actor: replacement)
+
+    rounds_before = round_count_for_event(event.id)
+
+    assert {:error, _error} =
+             Competition.create_round(event.id, course.id, actor: stale_admin)
+
+    assert round_count_for_event(event.id) == rounds_before
+  end
+
+  test "stale Competition Manager struct cannot configure_round_layout after assignment revocation" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    manager = create_staff_user!()
+    assign_role!(admin, event, manager, :competition_manager)
+    stale_manager = manager
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    hole_ids = Enum.map(holes, & &1.id)
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    assert {:ok, _} = ConfigureRoundLayout.run(admin, round.id, hole_ids)
+
+    before = route_snapshot(round.id)
+
+    assert {:ok, revoked} =
+             Accounts.revoke_event_staff_role(
+               active_assignment_record(event, manager, :competition_manager),
+               actor: admin
+             )
+
+    assert revoked.status == :revoked
+
+    assert {:error, :forbidden} =
+             ConfigureRoundLayout.run(stale_manager, round.id, Enum.reverse(hole_ids))
+
+    assert route_snapshot(round.id) == before
+  end
+
   defp assign_role!(actor, event, staff, role) do
     {:ok, _} =
       GolfScoring.Accounts.assign_event_staff_role(
@@ -271,6 +337,30 @@ defmodule GolfScoring.Competition.RoundTest do
       "SELECT id::text, course_hole_id::text, play_order FROM round_holes WHERE round_id = $1::uuid ORDER BY play_order",
       [Ecto.UUID.dump!(round_id)]
     ).rows
+  end
+
+  defp round_count_for_event(event_id) do
+    [[count]] =
+      Repo.query!("SELECT count(*) FROM rounds WHERE event_id = $1::uuid", [
+        Ecto.UUID.dump!(event_id)
+      ]).rows
+
+    count
+  end
+
+  defp active_assignment_record(event, staff, role \\ :event_admin) do
+    [[assignment_id]] =
+      Repo.query!(
+        "SELECT id::text FROM event_staff_assignments WHERE event_id = $1::uuid AND staff_user_id = $2::uuid AND role = $3 AND status = 'active'",
+        [
+          Ecto.UUID.dump!(event.id),
+          Ecto.UUID.dump!(staff.id),
+          Atom.to_string(role)
+        ]
+      ).rows
+
+    EventStaffAssignment
+    |> Ash.get!(assignment_id, authorize?: false)
   end
 
   defp round_audits(round_id) do

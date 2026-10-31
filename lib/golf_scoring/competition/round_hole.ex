@@ -31,11 +31,6 @@ defmodule GolfScoring.Competition.RoundHole do
       primary? true
     end
 
-    read :read_route do
-      public? false
-      prepare build(sort: [play_order: :asc])
-    end
-
     create :insert_layout_row do
       public? false
       accept [:round_id, :course_hole_id, :course_id, :play_order, :display_hole_number]
