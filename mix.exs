@@ -21,7 +21,13 @@ defmodule GolfScoring.MixProject do
       ],
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader],
-      consolidate_protocols: Mix.env() != :dev
+      consolidate_protocols: Mix.env() != :dev,
+      hex: [
+        # CVE-2026-117656 affects Assent's Sign in with Apple strategy only.
+        # GolfScoring uses password authentication only; AshAuthentication 4.x pins Assent to 0.2.x.
+        # Remove this acknowledgement before enabling external identity auth or when Assent >= 0.3.2 is locked.
+        ignore_advisories: ["CVE-2026-117656"]
+      ]
     ]
   end
 
