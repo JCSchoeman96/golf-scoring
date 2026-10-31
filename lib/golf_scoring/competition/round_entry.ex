@@ -172,5 +172,6 @@ defmodule GolfScoring.Competition.RoundEntry do
 
   identities do
     identity :unique_player_per_round, [:round_id, :player_id]
+    identity :unique_id_per_round, [:id, :round_id]
   end
 end
