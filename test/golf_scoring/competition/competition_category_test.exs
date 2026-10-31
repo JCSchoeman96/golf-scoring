@@ -399,37 +399,89 @@ defmodule GolfScoring.Competition.CompetitionCategoryTest do
     drop_membership_insert_failure_trigger!()
   end
 
-  test "concurrent category replacements leave one complete serialized result" do
-    %{event: event, round: round, admin: admin, entry: entry} = setup_entry!()
-    a = create_category!(round, "A")
-    b = create_category!(round, "B")
-    c = create_category!(round, "C")
-    d = create_category!(round, "D")
+  @tag :real_concurrency
+  test "independent PostgreSQL backends serialize concurrent category replacements" do
+    fixture_key = System.unique_integer([:positive])
+    email_prefix = "gls17-unboxed-#{fixture_key}"
 
-    assert {:ok, _} =
-             AssignRoundEntryCategories.run(admin, event.id, round.id, entry.id, [a.id])
+    fixture =
+      Sandbox.unboxed_run(Repo, fn ->
+        setup_committed_concurrency_fixture!(email_prefix)
+      end)
 
-    parent = self()
+    try do
+      parent = self()
+      set_bc = [fixture.b_id, fixture.c_id]
+      set_cd = [fixture.c_id, fixture.d_id]
 
-    tasks =
-      for set <- [[b.id, c.id], [c.id, d.id]] do
+      task_bc =
         Task.async(fn ->
-          Sandbox.allow(Repo, parent, self())
+          Sandbox.unboxed_run(Repo, fn ->
+            backend_pid = pg_backend_pid!()
+            send(parent, {:gls17_concurrency_ready, :set_bc, backend_pid})
 
-          AssignRoundEntryCategories.run(admin, event.id, round.id, entry.id, set)
+            receive do
+              :gls17_concurrency_go ->
+                AssignRoundEntryCategories.run(
+                  fixture.admin,
+                  fixture.event_id,
+                  fixture.round_id,
+                  fixture.entry_id,
+                  set_bc
+                )
+            after
+              10_000 -> flunk("GLS-17 concurrency task set_bc did not receive go signal")
+            end
+          end)
         end)
-      end
 
-    results = Task.await_many(tasks, 30_000)
-    assert Enum.all?(results, &match?({:ok, _}, &1))
+      task_cd =
+        Task.async(fn ->
+          Sandbox.unboxed_run(Repo, fn ->
+            backend_pid = pg_backend_pid!()
+            send(parent, {:gls17_concurrency_ready, :set_cd, backend_pid})
 
-    final_ids = list_membership_category_ids(entry.id)
-    assert membership_count(entry.id) == 2
+            receive do
+              :gls17_concurrency_go ->
+                AssignRoundEntryCategories.run(
+                  fixture.admin,
+                  fixture.event_id,
+                  fixture.round_id,
+                  fixture.entry_id,
+                  set_cd
+                )
+            after
+              10_000 -> flunk("GLS-17 concurrency task set_cd did not receive go signal")
+            end
+          end)
+        end)
 
-    assert Enum.sort(final_ids) in [
-             Enum.sort([b.id, c.id]),
-             Enum.sort([c.id, d.id])
-           ]
+      assert_receive {:gls17_concurrency_ready, :set_bc, backend_pid_bc}, 10_000
+      assert_receive {:gls17_concurrency_ready, :set_cd, backend_pid_cd}, 10_000
+      assert backend_pid_bc != backend_pid_cd
+
+      send(task_bc.pid, :gls17_concurrency_go)
+      send(task_cd.pid, :gls17_concurrency_go)
+
+      assert {:ok, _} = Task.await(task_bc, 30_000)
+      assert {:ok, _} = Task.await(task_cd, 30_000)
+
+      final_ids =
+        Sandbox.unboxed_run(Repo, fn ->
+          list_membership_category_ids(fixture.entry_id)
+        end)
+
+      sorted_final = Enum.sort(final_ids)
+      allowed = [Enum.sort(set_bc), Enum.sort(set_cd)]
+
+      assert length(final_ids) == 2
+      assert sorted_final in allowed
+      refute sorted_final == Enum.sort([fixture.a_id, fixture.b_id, fixture.c_id])
+      refute sorted_final == Enum.sort([fixture.b_id, fixture.c_id, fixture.d_id])
+      refute final_ids == []
+    after
+      cleanup_committed_concurrency_fixture!(fixture)
+    end
   end
 
   test "category assignment does not mutate RoundEntry identity or registration fields" do
@@ -618,5 +670,101 @@ defmodule GolfScoring.Competition.CompetitionCategoryTest do
       )
 
     course
+  end
+
+  defp setup_committed_concurrency_fixture!(email_prefix) do
+    event = create_event!()
+    admin = create_staff_user_for_prefix!(email_prefix)
+
+    Repo.query!(
+      "INSERT INTO event_staff_assignments (event_id, staff_user_id, role, status) VALUES ($1::uuid, $2::uuid, 'event_admin', 'active')",
+      [Ecto.UUID.dump!(event.id), Ecto.UUID.dump!(admin.id)]
+    )
+
+    course = create_course!(event, admin, "Unboxed#{System.unique_integer([:positive])}")
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+
+    player =
+      GolfScoring.Competition.Player
+      |> Ash.Changeset.for_create(:create_internal, %{
+        first_name: "Pat",
+        surname: "Unboxed#{System.unique_integer([:positive])}"
+      })
+      |> Ash.create!(authorize?: false)
+
+    {:ok, entry} =
+      Competition.add_round_entry(event.id, round.id, player.id, actor: admin)
+
+    a = create_category!(round, "A")
+    b = create_category!(round, "B")
+    c = create_category!(round, "C")
+    d = create_category!(round, "D")
+
+    assert {:ok, _} =
+             AssignRoundEntryCategories.run(admin, event.id, round.id, entry.id, [a.id])
+
+    %{
+      event_id: event.id,
+      round_id: round.id,
+      entry_id: entry.id,
+      player_id: player.id,
+      course_id: course.id,
+      staff_id: admin.id,
+      admin: admin,
+      a_id: a.id,
+      b_id: b.id,
+      c_id: c.id,
+      d_id: d.id
+    }
+  end
+
+  defp create_staff_user_for_prefix!(email_prefix) do
+    email = "#{email_prefix}-#{System.unique_integer([:positive])}@example.com"
+
+    Accounts.StaffUser
+    |> Ash.Changeset.for_create(:provision_staff_user, %{
+      email: email,
+      password: @password,
+      password_confirmation: @password
+    })
+    |> Ash.create!(authorize?: false)
+  end
+
+  defp pg_backend_pid! do
+    Repo.query!("SELECT pg_backend_pid()").rows |> hd() |> hd()
+  end
+
+  defp cleanup_committed_concurrency_fixture!(fixture) do
+    Sandbox.unboxed_run(Repo, fn ->
+      dumped_event = Ecto.UUID.dump!(fixture.event_id)
+      dumped_round = Ecto.UUID.dump!(fixture.round_id)
+      dumped_entry = Ecto.UUID.dump!(fixture.entry_id)
+      dumped_player = Ecto.UUID.dump!(fixture.player_id)
+      dumped_course = Ecto.UUID.dump!(fixture.course_id)
+      dumped_staff = Ecto.UUID.dump!(fixture.staff_id)
+
+      Repo.query!(
+        "DELETE FROM round_entry_category_memberships WHERE round_entry_id = $1::uuid",
+        [dumped_entry]
+      )
+
+      Repo.query!("DELETE FROM competition_categories WHERE round_id = $1::uuid", [dumped_round])
+      Repo.query!("DELETE FROM round_entries WHERE id = $1::uuid", [dumped_entry])
+      Repo.query!("DELETE FROM round_holes WHERE round_id = $1::uuid", [dumped_round])
+      Repo.query!("DELETE FROM rounds WHERE id = $1::uuid", [dumped_round])
+      Repo.query!("DELETE FROM players WHERE id = $1::uuid", [dumped_player])
+      Repo.query!("DELETE FROM course_holes WHERE course_id = $1::uuid", [dumped_course])
+      Repo.query!("DELETE FROM tee_sets WHERE course_id = $1::uuid", [dumped_course])
+      Repo.query!("DELETE FROM courses WHERE id = $1::uuid", [dumped_course])
+
+      Repo.query!(
+        "DELETE FROM audit_events WHERE target_id = $1::uuid OR actor_staff_user_id = $2::uuid OR target_id = $2::uuid",
+        [dumped_event, dumped_staff]
+      )
+
+      Repo.query!("DELETE FROM event_staff_assignments WHERE event_id = $1::uuid", [dumped_event])
+      Repo.query!("DELETE FROM events WHERE id = $1::uuid", [dumped_event])
+      Repo.query!("DELETE FROM staff_users WHERE id = $1::uuid", [dumped_staff])
+    end)
   end
 end
