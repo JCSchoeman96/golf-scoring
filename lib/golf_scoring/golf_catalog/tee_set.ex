@@ -74,6 +74,7 @@ defmodule GolfScoring.GolfCatalog.TeeSet do
   end
 
   identities do
+    identity :unique_id_per_course, [:id, :course_id]
     identity :unique_tee_marker_per_course, [:course_id, :name]
   end
 end

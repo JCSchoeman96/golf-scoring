@@ -80,9 +80,12 @@ defmodule GolfScoring.Competition.RoundHole do
       allow_nil? false
       public? false
     end
+
+    has_many :round_tee_hole_snapshots, GolfScoring.Competition.RoundTeeHoleSnapshot
   end
 
   identities do
+    identity :unique_id_per_round, [:id, :round_id]
     identity :unique_play_order_per_round, [:round_id, :play_order]
     identity :unique_course_hole_per_round, [:round_id, :course_hole_id]
   end

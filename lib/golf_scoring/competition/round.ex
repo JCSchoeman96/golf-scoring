@@ -159,6 +159,8 @@ defmodule GolfScoring.Competition.Round do
     has_many :round_holes, GolfScoring.Competition.RoundHole do
       sort play_order: :asc
     end
+
+    has_many :round_tee_profile_snapshots, GolfScoring.Competition.RoundTeeProfileSnapshot
   end
 
   identities do

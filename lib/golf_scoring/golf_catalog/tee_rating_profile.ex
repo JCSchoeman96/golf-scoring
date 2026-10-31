@@ -103,6 +103,7 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfile do
   end
 
   identities do
+    identity :unique_id_per_tee_set, [:id, :tee_set_id]
     identity :unique_rating_context_per_tee_set, [:tee_set_id, :rating_label]
   end
 end
