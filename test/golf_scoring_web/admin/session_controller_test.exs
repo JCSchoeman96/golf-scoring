@@ -20,7 +20,7 @@ defmodule GolfScoringWeb.Admin.SessionControllerTest do
     :ok
   end
 
-  test "unauthenticated requests to the staff foundation redirect to sign in", %{conn: conn} do
+  test "unauthenticated requests to the admin dashboard redirect to sign in", %{conn: conn} do
     conn = get(conn, "/admin")
 
     assert redirected_to(conn) == "/admin/sign-in"
@@ -58,16 +58,14 @@ defmodule GolfScoringWeb.Admin.SessionControllerTest do
            end)
   end
 
-  test "active staff can authenticate and reach the staff foundation", %{conn: conn} do
+  test "active staff can authenticate and reach the admin dashboard", %{conn: conn} do
     user = create_staff_user!()
     conn = authenticate(conn, user.email)
 
-    conn = conn |> recycle() |> get("/admin")
+    {:ok, _view, html} = live(conn, "/admin")
 
-    assert conn.status == 204
-    assert conn.assigns.current_staff_user.id == user.id
-    assert conn.assigns.current_staff_user.status == :active
-    assert conn.assigns.current_staff_user.system_admin == false
+    assert html =~ "Admin dashboard"
+    refute html =~ "id=\"create-event-button\""
   end
 
   test "wrong passwords do not create a staff session", %{conn: conn} do
@@ -120,10 +118,8 @@ defmodule GolfScoringWeb.Admin.SessionControllerTest do
     user = create_staff_user!()
     conn = authenticate(conn, user.email)
 
-    conn = conn |> recycle() |> get("/admin")
-
-    assert conn.assigns.current_staff_user.id == user.id
-    assert conn.assigns.current_staff_user.email == user.email
+    {:ok, view, _html} = live(conn, "/admin")
+    assert render(view) =~ "Admin dashboard"
   end
 
   test "the session stores identity only and refreshes SYSTEM_ADMIN from PostgreSQL", %{
@@ -149,6 +145,9 @@ defmodule GolfScoringWeb.Admin.SessionControllerTest do
     conn = conn |> recycle() |> get("/admin")
 
     assert conn.assigns.current_staff_user.system_admin == true
+    {:ok, view, html} = live(conn, "/admin")
+    assert html =~ "create-event-button"
+    assert has_element?(view, "#create-event-button")
   end
 
   test "an existing session loses access after staff status becomes suspended", %{conn: conn} do
@@ -190,7 +189,9 @@ defmodule GolfScoringWeb.Admin.SessionControllerTest do
     assert confirmation.status == 200
     assert confirmation.resp_body =~ "name=\"_csrf_token\""
     assert confirmation.resp_body =~ ~r/name="_method" type="hidden" hidden value="delete"/
-    assert get(recycle(confirmation), "/admin").status == 204
+
+    assert {:ok, _view, html} = live(recycle(conn), "/admin")
+    assert html =~ "Admin dashboard"
 
     csrf_token =
       Regex.run(
@@ -244,10 +245,10 @@ defmodule GolfScoringWeb.Admin.SessionControllerTest do
     user = create_staff_user!()
     conn = authenticate(conn, user.email)
 
-    conn = conn |> recycle() |> get("/admin")
+    {:ok, _view, html} = live(conn, "/admin")
 
-    assert conn.status == 204
-    assert conn.assigns.current_staff_user.system_admin == false
+    assert html =~ "Admin dashboard"
+    refute html =~ "create-event-button"
   end
 
   test "local session cookies are HTTP-only and use SameSite=Lax", %{conn: conn} do

@@ -21,8 +21,4 @@ defmodule GolfScoringWeb.Admin.SessionController do
     |> clear_session(:golf_scoring)
     |> redirect(to: "/admin/sign-in")
   end
-
-  def foundation(conn, _params) do
-    send_resp(conn, :no_content, "")
-  end
 end

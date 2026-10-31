@@ -61,7 +61,9 @@ defmodule GolfScoringWeb.Router do
   scope "/admin" do
     pipe_through [:browser, :require_staff]
 
-    get "/", GolfScoringWeb.Admin.SessionController, :foundation
+    ash_authentication_live_session :admin_staff do
+      live "/", GolfScoringWeb.Admin.DashboardLive, :index
+    end
   end
 
   # Other scopes may use custom stacks.
