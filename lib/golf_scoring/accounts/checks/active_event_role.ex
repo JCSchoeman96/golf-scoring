@@ -63,6 +63,25 @@ defmodule GolfScoring.Accounts.Checks.ActiveEventRole do
        do: event_id
 
   defp subject_event_id(
+         %Ash.Changeset{
+           resource: GolfScoring.Competition.RoundEntry,
+           data: %{event_id: event_id}
+         },
+         _context_resource
+       )
+       when not is_nil(event_id),
+       do: event_id
+
+  defp subject_event_id(
+         %Ash.Changeset{resource: GolfScoring.Competition.RoundEntry} = changeset,
+         _context_resource
+       ) do
+    Ash.Changeset.get_argument(changeset, :event_id) ||
+      Map.get(changeset.attributes, :event_id) ||
+      Map.get(changeset.data, :event_id)
+  end
+
+  defp subject_event_id(
          %Ash.Changeset{resource: GolfScoring.Competition.Round} = changeset,
          _context_resource
        ) do
@@ -93,6 +112,13 @@ defmodule GolfScoring.Accounts.Checks.ActiveEventRole do
 
   defp subject_event_id(
          %{resource: GolfScoring.Competition.Round, data: %{event_id: event_id}},
+         _context_resource
+       ) do
+    event_id
+  end
+
+  defp subject_event_id(
+         %{resource: GolfScoring.Competition.RoundEntry, data: %{event_id: event_id}},
          _context_resource
        ) do
     event_id

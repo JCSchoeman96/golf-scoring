@@ -161,9 +161,11 @@ defmodule GolfScoring.Competition.Round do
     end
 
     has_many :round_tee_profile_snapshots, GolfScoring.Competition.RoundTeeProfileSnapshot
+    has_many :round_entries, GolfScoring.Competition.RoundEntry
   end
 
   identities do
     identity :unique_id_per_course, [:id, :course_id]
+    identity :unique_id_per_event, [:id, :event_id]
   end
 end

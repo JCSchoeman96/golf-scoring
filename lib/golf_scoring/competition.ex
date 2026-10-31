@@ -24,5 +24,15 @@ defmodule GolfScoring.Competition do
 
     resource GolfScoring.Competition.RoundTeeProfileSnapshot
     resource GolfScoring.Competition.RoundTeeHoleSnapshot
+
+    resource GolfScoring.Competition.Player
+
+    resource GolfScoring.Competition.RoundEntry do
+      define :add_round_entry, action: :add_round_entry, args: [:event_id, :round_id, :player_id]
+      define :check_in_round_entry, action: :check_in_round_entry
+      define :mark_no_show, action: :mark_no_show
+      define :withdraw_before_start, action: :withdraw_before_start
+      define :get_round_entry_by_id, action: :read, get_by: [:id]
+    end
   end
 end
