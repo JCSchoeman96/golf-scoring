@@ -7,6 +7,16 @@
 
 This document defines implementation structure and sequencing. It does not override product/domain semantics in the frozen specification. If this architecture conflicts with the frozen Product & Domain Spec, the spec wins. Architecture changes that materially alter product/domain behavior require owner approval and a corresponding spec amendment. Amendments 1 and 2 supersede conflicting historical spec text.
 
+**Implementation roadmap clarification — 2026-10-31**
+
+Owner-approved implementation ownership clarification:
+
+- Phase 2 course setup explicitly owns entry of actual `TeeRatingProfile` per-hole par, Stroke Index and distance facts.
+- Phase 5 explicitly owns the online mobile `GroupScorecardLive`.
+- Phase 6 layers offline/reconnect behavior over that existing scorecard and must not create a second scoring path.
+
+No product/domain semantics changed.
+
 ## Principles and authority
 
 Build greenfield V2 in this repository; the legacy repository is reference only. Use Phoenix, LiveView, Ash and AshPostgres. PostgreSQL is durable authority. Use named Ash actions and policies for explicit resource boundaries, pure Elixir for golf mathematics, short PostgreSQL locks for critical operations, idempotent group-hole submissions, and Phoenix PubSub only after commit. IndexedDB stores browser pending/offline commands; it is not score authority. Do not add Redis or distributed locks without measured need. Do not use event sourcing, a generic scoring/rules DSL, microservices or multi-tenancy.
@@ -193,7 +203,7 @@ The stateful and shared web paths are:
 - `lib/golf_scoring_web/admin/messages_live.ex`
 - `lib/golf_scoring_web/admin/sponsors_live.ex`
 - `lib/golf_scoring_web/admin/side_competitions_live.ex`
-- `lib/golf_scoring_web/scoring/group_scoring_live.ex`
+- `lib/golf_scoring_web/scoring/group_scorecard_live.ex`
 - `lib/golf_scoring_web/scoring/verification_live.ex`
 - `lib/golf_scoring_web/scoring/components.ex`
 - `lib/golf_scoring_web/leaderboard/leaderboard_live.ex`
@@ -219,7 +229,7 @@ Do not add Oban until the external delivery phase. Planned boundaries are `lib/g
 
 Pure tests under `test/golf_scoring/scoring/calculators/` cover course handicap, playing handicap, stroke allocation, Stableford, mixed tees, Four-Ball BEST, solo normalization, Mystery BEST/WORST/BOTH and countback. `test/golf_scoring/scoring/policies/` covers pickup eligibility; `test/golf_scoring/competition/policies/` covers opening and reveal eligibility. Domain/resource and service tests under `test/golf_scoring/` cover state transitions, Ash policies, opening, atomic submission, idempotency, handover, verification revision invalidation, query/correction, global Mystery secrecy/reveal, finalization races and message dispatch idempotency. Concurrency-sensitive flows use simultaneous real database transactions, including last-group reveal and finalization races.
 
-`test/golf_scoring_web/` owns registration and group scoring LiveViews, player access exchange and leaderboard privacy/behavior. Browser tests under `test/browser/` and JS tests under `assets/test/` own serialization, ordered replay, conflict stop and IndexedDB restart/recovery. Real IndexedDB recovery requires real browser evidence, not mocks alone. Test stale role devices, replay after restart, duplicate and mismatched fingerprints, no self-verification, no hidden Mystery data, post-commit notifications and recovery after missed PubSub.
+`test/golf_scoring_web/scoring/group_scorecard_live_test.exs` is the focused LiveView test for Phase-5 online hole entry. `test/golf_scoring_web/` owns registration, `GroupScorecardLive` and other scoring LiveViews, player access exchange and leaderboard privacy/behavior. Browser tests under `test/browser/` and JS tests under `assets/test/` own serialization, ordered replay, conflict stop and IndexedDB restart/recovery. Real IndexedDB recovery requires real browser evidence, not mocks alone. Test stale role devices, replay after restart, duplicate and mismatched fingerprints, no self-verification, no hidden Mystery data, post-commit notifications and recovery after missed PubSub.
 
 Plan `.github/workflows/ci.yml` with `mix format --check-formatted`, `mix compile --warnings-as-errors`, and `mix test`, initially on one supported Elixir/OTP/PostgreSQL combination. Add JS/browser queue tests when their harness exists. No unnecessary matrix. This document does not implement CI.
 
@@ -251,14 +261,47 @@ Each phase inherits the global STOP conditions and frozen spec. Tests and exit c
 
 ### Phase 2 — Catalog, Event and round setup
 
-- Goal: Establish Event authority, catalog and immutable round snapshots.
+- Goal: Establish Event authority, catalog and immutable round snapshots, with practical staff setup of real course and tee/rating facts.
 - Prerequisites: Phase 1.
 - Resources/modules introduced: Course, CourseHole, TeeSet, TeeRatingProfile, Event, EventStaffAssignment, Round, RoundHole, RoundTeeProfileSnapshot, RoundTeeHoleSnapshot and CreateEvent service.
-- User-visible outcome: A SYSTEM_ADMIN creates an Event with their initial active EVENT_ADMIN assignment; event-authorized staff configure the round.
-- Critical tests: Atomic Event, assignment and audit creation; rollback on assignment failure; non-SYSTEM_ADMIN denial; event-scoped permissions; catalog snapshot isolation; RoundHole routing constraints.
-- Exit criteria: Atomic bootstrap and valid 18-hole setup persist.
+- User-visible setup responsibility: Authorized Event staff configure catalog and round snapshot inputs through admin setup UI (including `CourseSetupLive` and round layout flows). The configured tree is:
+
+```text
+Course
+  └── physical CourseHole identity
+
+TeeSet
+  └── TeeRatingProfile
+      ├── rating label/context
+      ├── Course Rating
+      ├── Slope Rating
+      ├── total/applicable par
+      └── per physical hole
+          ├── par
+          ├── Stroke Index
+          └── distance where available
+```
+
+Ownership rules:
+
+```text
+CourseHole
+= physical hole identity only
+
+TeeRatingProfile
+= tee/rating-context scoring facts
+
+RoundTeeHoleSnapshot
+= frozen Round copy of tee/rating-context scoring facts
+```
+
+Setup UI must collect and persist actual configured golf values. It must never fabricate placeholder par, Stroke Index or distance data and treat it as authoritative (for example `par = 4`, `stroke_index = physical_hole_number`, `distance = 300 + hole_number`) unless those exact values were entered or loaded from authoritative configured data.
+
+- User-visible outcome: A SYSTEM_ADMIN creates an Event with their initial active EVENT_ADMIN assignment; event-authorized staff configure the round with real tee/rating hole data.
+- Critical tests: Atomic Event, assignment and audit creation; rollback on assignment failure; non-SYSTEM_ADMIN denial; event-scoped permissions; catalog snapshot isolation; RoundHole routing constraints; LiveView tests that submit nontrivial per-hole rating values (physical hole number, Stroke Index, par and distance deliberately different) and verify exact persistence through the existing named `GolfCatalog` actions.
+- Exit criteria: Atomic bootstrap and valid 18-hole setup persist with authoritative tee/rating facts, not synthetic defaults.
 - Explicitly deferred work: Player access and scoring opening.
-- STOP conditions: Event bootstrap, snapshot or ownership constraint fails.
+- STOP conditions: Event bootstrap, snapshot or ownership constraint fails; setup UI cannot capture real tee/rating facts.
 
 ### Phase 3 — Participation and check-in
 
@@ -293,27 +336,56 @@ Each phase inherits the global STOP conditions and frozen spec. Tests and exit c
 - Explicitly deferred work: Score submission.
 - STOP conditions: Any hard opening invariant fails or the shared lock protocol is not accepted.
 
-### Phase 5 — Transaction-safe group scoring and global reveal state
+### Phase 5 — Transaction-safe group scoring, online scorecard and global reveal state
 
-- Goal: Accept complete authoritative holes and perform global Mystery reveal rechecks.
+- Goal: Accept complete authoritative holes, expose the practical mobile-first online group scorecard, and perform global Mystery reveal rechecks.
 - Prerequisites: Phase 4B and the accepted lock-protocol ticket.
-- Resources/modules introduced: Scorecard, HoleResult, HoleSubmission, MysteryReveal, SubmitGroupHole, MysteryRevealEligibility and the transactional global reveal recheck.
-- User-visible outcome: Online whole-hole scoring with global reveal state.
-- Critical tests: Atomic submission, idempotent retry and payload mismatch, current scorer and stale assignment rejection, simultaneous group submissions, last-required-group reveal race, `UNIQUE(mystery_hole_rule_id)`, no premature reveal, no hidden Mystery data in submission responses, and missed PubSub recovery.
-- Exit criteria: No partial, lost or duplicated score; accepted submission, paper recovery and relevant eligibility transitions re-evaluate the fixed global cohort under the lock protocol. The authoritative command contract is complete before offline replay.
-- Explicitly deferred work: Offline queue and leaderboard presentation.
-- STOP conditions: Transaction or secrecy invariant cannot be preserved, or the shared lock protocol is not accepted.
+- Resources/modules introduced: Scorecard, HoleResult, HoleSubmission, MysteryReveal, SubmitGroupHole, MysteryRevealEligibility, `GolfScoringWeb.Scoring.GroupScorecardLive` (`lib/golf_scoring_web/scoring/group_scorecard_live.ex`), and the transactional global reveal recheck.
+- Presentation boundary: `GroupScorecardLive` owns presentation and command capture only. It consumes RoundHole route, RoundTeeHoleSnapshot, RoundEntry, PlayingGroup, GroupRoleAssignment, CompetitionHandicap / allocated strokes, Stableford calculator outputs and SubmitGroupHole. It must never directly create or update HoleResult, HoleSubmission or other authoritative score state; writes go through the accepted scoring service.
+- Scorecard UI lifecycle:
 
-### Phase 6 — Mobile scoring and offline recovery
+```text
+UNAVAILABLE
+    |
+    | Round -> scoring_open
+    | valid group access
+    | active scorer context
+    v
+SCORING_ACTIVE
+    |
+    | accepted SubmitGroupHole
+    | more holes remain
+    v
+SCORING_ACTIVE on next RoundHole
+    |
+    | final required hole accepted
+    v
+ROUND_ENTRY_COMPLETE / GROUP_PLAY_COMPLETE PRESENTATION
+```
 
-- Goal: Preserve pending commands and reconcile safely against the completed Phase 5 submission contract, without a second scoring path.
-- Prerequisites: Phase 5.
+Protected Round states `draft`, `ready`, `scoring_closed`, `finalized` and `cancelled` must not permit ordinary new score submission. The scorecard UI does not own Round transitions. If scoring closes while the page is open, the next submission must be rejected by server authority and the UI must surface the state change; stale LiveView state must not bypass current authority.
+
+- Required online scorecard presentation (2–4 active players, not assumed to be four): Event/Round context; PlayingGroup identity; starting hole; current physical/display hole; holes completed and remaining; actual shotgun playing sequence; for the current hole — par, Stroke Index and distance where available; for each active player — name, tee/rating context where useful, Playing Handicap / relevant handicap context, strokes received on this hole and outcome input. Display derived calculation results from existing calculators only; do not implement golf formulas in the LiveView. Preserve distinct presentation of actual gross, handicap-adjusted/net and Stableford points.
+- Score entry: For each active golfer, allow only valid resolved outcomes — at minimum numeric gross, and where competition policy permits, explicit picked-up / no-points style outcomes. Do not offer a meaningless generic “No Score”. Blank input remains missing input, not zero, picked up, withdrawn or completed. The group cannot advance until every active player has a resolved outcome for the current hole. “Submit Hole” sends exactly one whole-hole command through `GolfScoring.Scoring.Services.SubmitGroupHole`; on accepted receipt, advance to the next RoundHole in actual playing order (not naive `hole + 1`; shotgun wraparound such as `14 → … → 18 → 1 → … → 13` must work).
+- Mystery secrecy: The online scorecard must not expose secret MysteryHoleRule configuration, hidden Mystery contribution or data from which an unrevealed rule can be inferred.
+- Submission authority: Browser state is not authority. Submission re-checks Round state, current PlayingGroup, Primary Scorer assignment, assignment revision, active RoundEntries, expected progression/current RoundHole and idempotency key/fingerprint through the Phase-5 service. Stale scorer or conflict must produce structured rejection and controlled UI stop, not overwrite.
+- User-visible outcome: A group scorer can use a mobile-first scorecard to enter the current hole for all 2–4 active golfers, see real Round/tee/hole context, submit the complete hole through the authoritative command service, and advance in shotgun playing order.
+- Critical tests: Atomic submission, idempotent retry and payload mismatch, current scorer and stale assignment rejection, simultaneous group submissions, last-required-group reveal race, `UNIQUE(mystery_hole_rule_id)`, no premature reveal, no hidden Mystery data in submission responses, missed PubSub recovery; additionally 2/3/4-player rendering, starting-hole and shotgun wraparound, per-hole par/SI/distance presentation, allocated strokes, numeric gross and permitted pickup entry, missing player outcome prevents advancement, no direct score-resource writes from LiveView, stale scorer rejection after mount, current authority after mount, accepted whole-hole submission advances exactly once.
+- Exit criteria: Online scoring works end-to-end through SubmitGroupHole before offline support is introduced. No partial, lost or duplicated score; accepted submission, paper recovery and relevant eligibility transitions re-evaluate the fixed global cohort under the lock protocol. The authoritative command contract is complete before offline replay.
+- Explicitly deferred work: Offline queue/replay and leaderboard presentation.
+- STOP conditions: Transaction or secrecy invariant cannot be preserved, the shared lock protocol is not accepted, or the scorecard would require a second score-write path or duplicated golf formulas.
+
+### Phase 6 — Mobile offline recovery around the existing scorecard
+
+- Goal: Add offline/reconnect durability to the already-working Phase-5 `GroupScorecardLive` without introducing another score-entry or acceptance path.
+- Prerequisites: Phase 5 (including accepted online `GroupScorecardLive`).
 - Resources/modules introduced: IndexedDB pending commands, serializer, queue, connection state, leaderboard cache and scoring hook.
-- User-visible outcome: Offline capture, ordered replay and conflict UI.
+- Integration rule: The Phase-6 scoring hook integrates with `GroupScorecardLive`; it does not create or own a second scorecard UI. Offline commands replay the exact Phase-5 `SubmitGroupHole` command contract.
+- User-visible outcome: Offline capture, ordered replay and conflict UI layered on the existing online scorecard.
 - Critical tests: Real browser restart, stable idempotency key, captured assignment identity, expected revision, order, role change and conflict stop.
 - Exit criteria: Real browser recovery evidence passes; server acceptance remains authority.
 - Explicitly deferred work: Official results.
-- STOP conditions: Stale device can overwrite authority.
+- STOP conditions: Stale device can overwrite authority; offline work introduces a second submission path or duplicate scorecard UI.
 
 ### Phase 7 — Verification and corrections
 
@@ -396,9 +468,13 @@ Handicap + complete scoring/competition configuration
         ↓
 Guarded round opening
         ↓
-Authoritative scoring + global Mystery reveal
+Authoritative SubmitGroupHole contract
+        ↓
+Online GroupScorecardLive
+        ↓
+Offline queue / replay integration
        ↙                         ↘
-Offline recovery          verification/correction
+verification/correction          (from authoritative Phase-5 scoring)
        \                         /
         leaderboard derivation/presentation
                        ↓
