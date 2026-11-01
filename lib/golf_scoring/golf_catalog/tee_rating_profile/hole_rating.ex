@@ -27,5 +27,11 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfile.HoleRating do
       public? true
       constraints min: 1
     end
+
+    attribute :plus_stroke_order, :integer do
+      allow_nil? true
+      public? true
+      constraints min: 1, max: 8
+    end
   end
 end

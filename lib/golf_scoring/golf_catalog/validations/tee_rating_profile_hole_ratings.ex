@@ -18,7 +18,8 @@ defmodule GolfScoring.GolfCatalog.Validations.TeeRatingProfileHoleRatings do
     hole_ratings = Ash.Changeset.get_attribute(changeset, :hole_ratings) || []
 
     with {:ok, tee_set} <- fetch_tee_set(tee_set_id),
-         :ok <- validate_no_duplicate_holes(hole_ratings) do
+         :ok <- validate_no_duplicate_holes(hole_ratings),
+         :ok <- validate_plus_stroke_orders(hole_ratings) do
       validate_holes_belong_to_course(hole_ratings, tee_set.course_id)
     end
   end
@@ -48,6 +49,33 @@ defmodule GolfScoring.GolfCatalog.Validations.TeeRatingProfileHoleRatings do
       :ok
     else
       {:error, field: :hole_ratings, message: "must not contain duplicate course holes"}
+    end
+  end
+
+  defp plus_stroke_orders(hole_ratings) do
+    hole_ratings
+    |> Enum.map(fn
+      %{plus_stroke_order: order} -> order
+      %{} = entry -> Map.get(entry, :plus_stroke_order) || Map.get(entry, "plus_stroke_order")
+    end)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp validate_plus_stroke_orders(hole_ratings) do
+    orders = plus_stroke_orders(hole_ratings)
+
+    cond do
+      orders == [] ->
+        :ok
+
+      Enum.sort(orders) == [1, 2, 3, 4, 5, 6, 7, 8] ->
+        :ok
+
+      true ->
+        {:error,
+         field: :hole_ratings,
+         message:
+           "Plus Strokes allocation must be absent or contain exactly one each of orders 1 through 8"}
     end
   end
 

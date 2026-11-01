@@ -18,6 +18,13 @@ defmodule GolfScoring.Competition.RoundTeeHoleSnapshot do
       reference :round_hole, on_delete: :restrict, match_with: [round_id: :round_id]
     end
 
+    custom_indexes do
+      index [:round_tee_profile_snapshot_id, :plus_stroke_order],
+        unique: true,
+        name: "round_tee_hole_snapshots_unique_plus_stroke_order_per_profile",
+        where: "plus_stroke_order IS NOT NULL"
+    end
+
     check_constraints do
       check_constraint :par, "round_tee_hole_snapshots_par_in_range",
         check: "par >= 3 AND par <= 7",
@@ -30,6 +37,10 @@ defmodule GolfScoring.Competition.RoundTeeHoleSnapshot do
       check_constraint :distance_m, "round_tee_hole_snapshots_distance_positive",
         check: "distance_m IS NULL OR distance_m > 0",
         message: "must be positive when present"
+
+      check_constraint :plus_stroke_order, "round_tee_hole_snapshots_plus_stroke_order_in_range",
+        check: "plus_stroke_order IS NULL OR (plus_stroke_order >= 1 AND plus_stroke_order <= 8)",
+        message: "must be between 1 and 8 when present"
     end
   end
 
@@ -48,13 +59,14 @@ defmodule GolfScoring.Competition.RoundTeeHoleSnapshot do
         :round_hole_id,
         :par,
         :stroke_index,
-        :distance_m
+        :distance_m,
+        :plus_stroke_order
       ]
     end
 
     update :refresh_hole_snapshot_values do
       public? false
-      accept [:par, :stroke_index, :distance_m]
+      accept [:par, :stroke_index, :distance_m, :plus_stroke_order]
       require_atomic? false
     end
 
@@ -82,6 +94,12 @@ defmodule GolfScoring.Competition.RoundTeeHoleSnapshot do
       allow_nil? true
       public? false
       constraints min: 1
+    end
+
+    attribute :plus_stroke_order, :integer do
+      allow_nil? true
+      public? false
+      constraints min: 1, max: 8
     end
 
     timestamps()
