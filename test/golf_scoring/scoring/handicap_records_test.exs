@@ -12,6 +12,7 @@ defmodule GolfScoring.Scoring.HandicapRecordsTest do
   alias GolfScoring.Competition.Event
   alias GolfScoring.Competition.Player
   alias GolfScoring.Competition.Round
+  alias GolfScoring.Competition.RoundCompetition
   alias GolfScoring.Competition.Services.ConfigureRoundCompetition
   alias GolfScoring.Competition.Services.ConfigureRoundLayout
   alias GolfScoring.Competition.Services.SnapshotRoundTeeProfiles
@@ -19,6 +20,7 @@ defmodule GolfScoring.Scoring.HandicapRecordsTest do
   alias GolfScoring.Repo
   alias GolfScoring.Scoring
   alias GolfScoring.Scoring.CompetitionHandicap
+  alias GolfScoring.Scoring.HandicapRowLock
   alias GolfScoring.Scoring.HandicapSnapshot
 
   @password "GLS-22 synthetic staff passphrase 2026"
@@ -597,6 +599,264 @@ defmodule GolfScoring.Scoring.HandicapRecordsTest do
     assert error.postgres.code == :foreign_key_violation
   end
 
+  describe "GLS-74 allowance correction invalidates competition handicaps" do
+    test "no-op allowance save preserves derived competition handicaps" do
+      setup = setup_round_with_tees!(assign_tee: true, competition: true)
+      build_built_snapshot!(setup)
+
+      assert {:ok, _} =
+               Scoring.build_competition_handicap(setup.entry.id, setup.competition.id, %{
+                 playing_handicap: 8,
+                 policy_identifier: "gls74_policy",
+                 allowance_applied: true
+               })
+
+      assert competition_count_for_round_competition!(setup.competition.id) == 1
+
+      assert {:ok, updated} =
+               ConfigureRoundCompetition.run(setup.admin, setup.event.id, setup.round.id, %{
+                 handicap_allowance_percent: setup.competition.handicap_allowance_percent
+               })
+
+      assert updated.handicap_allowance_percent == setup.competition.handicap_allowance_percent
+      assert competition_count_for_round_competition!(setup.competition.id) == 1
+    end
+
+    test "unrelated round competition configuration preserves derived competition handicaps" do
+      setup = setup_round_with_tees!(assign_tee: true, competition: true)
+      build_built_snapshot!(setup)
+
+      assert {:ok, _} =
+               Scoring.build_competition_handicap(setup.entry.id, setup.competition.id, %{
+                 playing_handicap: 8,
+                 policy_identifier: "gls74_policy",
+                 allowance_applied: true
+               })
+
+      assert {:ok, _} =
+               ConfigureRoundCompetition.run(setup.admin, setup.event.id, setup.round.id, %{
+                 solo_sides_permitted: true
+               })
+
+      assert competition_count_for_round_competition!(setup.competition.id) == 1
+    end
+
+    test "allowance change removes competition handicaps for the target round competition only" do
+      setup = setup_round_with_tees!(assign_tee: true, competition: true)
+      other = create_non_primary_round_competition!(setup, handicap_allowance_percent: 75)
+      build_built_snapshot!(setup)
+
+      assert {:ok, primary_row} =
+               Scoring.build_competition_handicap(setup.entry.id, setup.competition.id, %{
+                 playing_handicap: 8,
+                 policy_identifier: "gls74_primary",
+                 allowance_applied: true
+               })
+
+      assert {:ok, other_row} =
+               Scoring.build_competition_handicap(setup.entry.id, other.id, %{
+                 playing_handicap: 6,
+                 policy_identifier: "gls74_other",
+                 allowance_applied: true
+               })
+
+      assert primary_row.handicap_allowance_percent ==
+               setup.competition.handicap_allowance_percent
+
+      assert other_row.handicap_allowance_percent == 75
+
+      assert {:ok, updated} =
+               ConfigureRoundCompetition.run(setup.admin, setup.event.id, setup.round.id, %{
+                 handicap_allowance_percent: 90
+               })
+
+      assert updated.handicap_allowance_percent == 90
+      assert competition_count_for_round_competition!(setup.competition.id) == 0
+      assert competition_count_for_round_competition!(other.id) == 1
+      assert fetch_competition_handicap!(other_row.id).handicap_allowance_percent == 75
+    end
+
+    test "allowance invalidation preserves handicap snapshot facts" do
+      setup = setup_round_with_tees!(assign_tee: true, competition: true)
+      build_built_snapshot!(setup)
+      before = fetch_snapshot!(setup.entry.id)
+
+      assert {:ok, _} =
+               Scoring.build_competition_handicap(setup.entry.id, setup.competition.id, %{
+                 playing_handicap: 8,
+                 policy_identifier: "gls74_policy",
+                 allowance_applied: true
+               })
+
+      assert {:ok, _} =
+               ConfigureRoundCompetition.run(setup.admin, setup.event.id, setup.round.id, %{
+                 handicap_allowance_percent: 90
+               })
+
+      after_snapshot = fetch_snapshot!(setup.entry.id)
+      assert after_snapshot.built_at
+      assert after_snapshot.course_handicap_rounded == before.course_handicap_rounded
+      assert after_snapshot.course_handicap_unrounded == before.course_handicap_unrounded
+      assert after_snapshot.round_tee_profile_snapshot_id == before.round_tee_profile_snapshot_id
+    end
+
+    test "allowance correction rolls back when competition handicap invalidation fails" do
+      setup = setup_round_with_tees!(assign_tee: true, competition: true)
+      build_built_snapshot!(setup)
+
+      assert {:ok, _} =
+               Scoring.build_competition_handicap(setup.entry.id, setup.competition.id, %{
+                 playing_handicap: 8,
+                 policy_identifier: "gls74_policy",
+                 allowance_applied: true
+               })
+
+      install_competition_handicap_destroy_failure_trigger!()
+      on_exit(fn -> drop_competition_handicap_destroy_failure_trigger!() end)
+
+      assert {:error, _reason} =
+               ConfigureRoundCompetition.run(setup.admin, setup.event.id, setup.round.id, %{
+                 handicap_allowance_percent: 90
+               })
+
+      assert persisted_allowance_percent!(setup.competition.id) ==
+               setup.competition.handicap_allowance_percent
+
+      assert competition_count_for_round_competition!(setup.competition.id) == 1
+    end
+
+    test "build after allowance correction persists the corrected allowance" do
+      setup = setup_round_with_tees!(assign_tee: true, competition: true)
+      build_built_snapshot!(setup)
+
+      assert {:ok, _} =
+               ConfigureRoundCompetition.run(setup.admin, setup.event.id, setup.round.id, %{
+                 handicap_allowance_percent: 90
+               })
+
+      assert {:ok, row} =
+               Scoring.build_competition_handicap(setup.entry.id, setup.competition.id, %{
+                 playing_handicap: 9,
+                 policy_identifier: "gls74_policy",
+                 allowance_applied: true
+               })
+
+      assert row.handicap_allowance_percent == 90
+      refute stale_allowance_rows?(setup.competition.id, 90)
+    end
+
+    test "concurrent allowance correction and build serialize on the round competition row lock" do
+      setup = setup_round_with_tees!(assign_tee: true, competition: true)
+      build_built_snapshot!(setup)
+      parent = self()
+
+      blocker =
+        Task.async(fn ->
+          Sandbox.allow(Repo, parent, self())
+
+          Repo.transaction(fn ->
+            lock_round_row!(setup.round.id)
+
+            assert {:ok, _} =
+                     HandicapRowLock.lock_round_competition!(setup.competition.id, setup.round.id)
+
+            send(parent, :gls74_round_competition_locked)
+
+            receive do
+              :gls74_release_round_competition_lock -> :released
+            after
+              15_000 -> Repo.rollback(:gls74_blocker_timeout)
+            end
+          end)
+        end)
+
+      assert_receive :gls74_round_competition_locked, 5_000
+
+      build_task =
+        Task.async(fn ->
+          Sandbox.allow(Repo, parent, self())
+
+          Scoring.build_competition_handicap(setup.entry.id, setup.competition.id, %{
+            playing_handicap: 8,
+            policy_identifier: "gls74_policy",
+            allowance_applied: true
+          })
+        end)
+
+      refute Task.yield(build_task, 200)
+
+      configure_task =
+        Task.async(fn ->
+          Sandbox.allow(Repo, parent, self())
+
+          ConfigureRoundCompetition.run(setup.admin, setup.event.id, setup.round.id, %{
+            handicap_allowance_percent: 90
+          })
+        end)
+
+      refute Task.yield(configure_task, 200)
+
+      send(blocker.pid, :gls74_release_round_competition_lock)
+      assert {:ok, :released} = Task.await(blocker, 10_000)
+      assert {:ok, build_row} = Task.await(build_task, 10_000)
+      assert {:ok, updated} = Task.await(configure_task, 10_000)
+      assert updated.handicap_allowance_percent == 90
+      assert build_row.handicap_allowance_percent in [85, 90]
+      refute stale_allowance_rows?(setup.competition.id, updated.handicap_allowance_percent)
+    end
+
+    test "racing allowance correction and build never leaves stale allowance rows" do
+      setup = setup_round_with_tees!(assign_tee: true, competition: true, entries: 2)
+
+      for entry <- setup.entries do
+        assert {:ok, _} =
+                 Competition.assign_round_tee(
+                   setup.admin,
+                   setup.event.id,
+                   setup.round.id,
+                   entry.id,
+                   setup.tee_a.id
+                 )
+
+        build_built_snapshot!(Map.put(setup, :entry, entry))
+      end
+
+      parent = self()
+
+      for _ <- 1..20 do
+        reset_primary_allowance!(setup.competition.id, 85)
+        clear_competition_handicaps_for!(setup.competition.id)
+
+        tasks =
+          for entry <- setup.entries do
+            Task.async(fn ->
+              Sandbox.allow(Repo, parent, self())
+
+              Scoring.build_competition_handicap(entry.id, setup.competition.id, %{
+                playing_handicap: 8,
+                policy_identifier: "gls74_race",
+                allowance_applied: true
+              })
+            end)
+          end ++
+            [
+              Task.async(fn ->
+                Sandbox.allow(Repo, parent, self())
+
+                ConfigureRoundCompetition.run(setup.admin, setup.event.id, setup.round.id, %{
+                  handicap_allowance_percent: 90
+                })
+              end)
+            ]
+
+        Enum.each(tasks, &Task.await(&1, 30_000))
+
+        allowance = persisted_allowance_percent!(setup.competition.id)
+        refute stale_allowance_rows?(setup.competition.id, allowance)
+      end
+    end
+  end
+
   test "build_competition_handicap persists allowance from RoundCompetition" do
     setup = setup_round_with_tees!(assign_tee: true, competition: true)
 
@@ -972,5 +1232,86 @@ defmodule GolfScoring.Scoring.HandicapRecordsTest do
     )
 
     Repo.query!("DROP FUNCTION IF EXISTS gls22_reject_competition_handicap_delete()")
+  end
+
+  defp create_non_primary_round_competition!(setup, attrs) do
+    defaults = %{
+      event_id: setup.event.id,
+      round_id: setup.round.id,
+      is_primary: false,
+      scoring_policy_identifier: "four_ball_stableford_v1",
+      handicap_allowance_percent: 100,
+      solo_sides_permitted: false,
+      solo_normalization_policy_identifier: "companion_max_p_minus_one_v1",
+      pickup_policy_identifier: "standard_pickup_v1"
+    }
+
+    RoundCompetition
+    |> Ash.Changeset.for_create(:configure_internal, Map.merge(defaults, Map.new(attrs)))
+    |> Ash.create!(authorize?: false)
+  end
+
+  defp competition_count_for_round_competition!(round_competition_id) do
+    [[count]] =
+      Repo.query!(
+        "SELECT count(*) FROM competition_handicaps WHERE round_competition_id = $1::uuid",
+        [Ecto.UUID.dump!(round_competition_id)]
+      ).rows
+
+    count
+  end
+
+  defp fetch_competition_handicap!(id) do
+    CompetitionHandicap
+    |> Ash.get!(id, authorize?: false)
+  end
+
+  defp persisted_allowance_percent!(round_competition_id) do
+    [[allowance]] =
+      Repo.query!(
+        "SELECT handicap_allowance_percent FROM round_competitions WHERE id = $1::uuid",
+        [Ecto.UUID.dump!(round_competition_id)]
+      ).rows
+
+    allowance
+  end
+
+  defp reset_primary_allowance!(round_competition_id, allowance) do
+    Repo.query!(
+      "UPDATE round_competitions SET handicap_allowance_percent = $1 WHERE id = $2::uuid",
+      [allowance, Ecto.UUID.dump!(round_competition_id)]
+    )
+  end
+
+  defp clear_competition_handicaps_for!(round_competition_id) do
+    Repo.query!(
+      "DELETE FROM competition_handicaps WHERE round_competition_id = $1::uuid",
+      [Ecto.UUID.dump!(round_competition_id)]
+    )
+  end
+
+  defp stale_allowance_rows?(round_competition_id, current_allowance) do
+    [[count]] =
+      Repo.query!(
+        """
+        SELECT count(*)
+        FROM competition_handicaps
+        WHERE round_competition_id = $1::uuid
+          AND handicap_allowance_percent <> $2
+        """,
+        [Ecto.UUID.dump!(round_competition_id), current_allowance]
+      ).rows
+
+    count > 0
+  end
+
+  defp lock_round_row!(round_id) do
+    case Repo.query!(
+           "SELECT id FROM rounds WHERE id = $1::uuid FOR UPDATE",
+           [Ecto.UUID.dump!(round_id)]
+         ).rows do
+      [[_id]] -> :ok
+      [] -> raise "round not found"
+    end
   end
 end
