@@ -100,7 +100,8 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantGuard do
 
   def lazy_expire_if_due!(grant, _now), do: {:ok, grant}
 
-  @spec apply_lazy_expiry_for_digest(Ecto.Repo.t(), binary(), DateTime.t()) :: :ok
+  @spec apply_lazy_expiry_for_digest(Ecto.Repo.t(), binary(), DateTime.t()) ::
+          :ok | {:error, term()}
   def apply_lazy_expiry_for_digest(repo, digest, now \\ DateTime.utc_now()) do
     case repo.query!(
            """
@@ -120,8 +121,10 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantGuard do
           expires_at: expires_at
         }
 
-        _ = lazy_expire_if_due!(grant, now)
-        :ok
+        case lazy_expire_if_due!(grant, now) do
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
 
       [] ->
         :ok
@@ -163,11 +166,14 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantGuard do
   @spec find_active_by_digest(Ecto.Repo.t(), binary(), DateTime.t()) ::
           {:ok, map()} | {:error, :invalid_credentials}
   def find_active_by_digest(repo, digest, now \\ DateTime.utc_now()) do
-    :ok = apply_lazy_expiry_for_digest(repo, digest, now)
-    find_usable_active_by_digest(repo, digest, now)
+    case apply_lazy_expiry_for_digest(repo, digest, now) do
+      :ok -> find_usable_active_by_digest(repo, digest, now)
+      {:error, _} -> {:error, :invalid_credentials}
+    end
   end
 
-  @spec apply_lazy_expiry_for_grant_id(Ecto.Repo.t(), Ecto.UUID.t(), DateTime.t()) :: :ok
+  @spec apply_lazy_expiry_for_grant_id(Ecto.Repo.t(), Ecto.UUID.t(), DateTime.t()) ::
+          :ok | {:error, term()}
   def apply_lazy_expiry_for_grant_id(repo, grant_id, now \\ DateTime.utc_now()) do
     case repo.query!(
            """
@@ -188,10 +194,13 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantGuard do
         }
 
         if grant.state == :active do
-          _ = lazy_expire_if_due!(grant, now)
+          case lazy_expire_if_due!(grant, now) do
+            {:ok, _} -> :ok
+            {:error, reason} -> {:error, reason}
+          end
+        else
+          :ok
         end
-
-        :ok
 
       [] ->
         :ok
@@ -201,20 +210,26 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantGuard do
   @spec load_grant_for_session(Ecto.UUID.t(), DateTime.t()) ::
           {:ok, PlayerAccessGrant.t()} | {:error, :invalid_player_session}
   def load_grant_for_session(grant_id, now \\ DateTime.utc_now()) do
-    _ =
-      Repo.transaction(fn ->
-        apply_lazy_expiry_for_grant_id(Repo, grant_id, now)
-      end)
+    case Repo.transaction(fn ->
+           case apply_lazy_expiry_for_grant_id(Repo, grant_id, now) do
+             :ok -> :ok
+             {:error, reason} -> Repo.rollback(reason)
+           end
+         end) do
+      {:ok, :ok} ->
+        case Ash.get(PlayerAccessGrant, grant_id, authorize?: false) do
+          {:ok, grant} ->
+            if grant.state == :active and not grant_expired?(grant, now) do
+              {:ok, grant}
+            else
+              {:error, :invalid_player_session}
+            end
 
-    case Ash.get(PlayerAccessGrant, grant_id, authorize?: false) do
-      {:ok, grant} ->
-        if grant.state == :active and not grant_expired?(grant, now) do
-          {:ok, grant}
-        else
-          {:error, :invalid_player_session}
+          _ ->
+            {:error, :invalid_player_session}
         end
 
-      _ ->
+      {:error, _reason} ->
         {:error, :invalid_player_session}
     end
   end

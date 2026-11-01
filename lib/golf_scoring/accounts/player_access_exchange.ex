@@ -9,11 +9,24 @@ defmodule GolfScoring.Accounts.PlayerAccessExchange do
   def exchange(token) when is_binary(token) and byte_size(token) > 0 do
     digest = PlayerAccessToken.digest(token)
 
-    _ =
+    expiry_result =
       Repo.transaction(fn ->
-        PlayerAccessGrantGuard.apply_lazy_expiry_for_digest(Repo, digest)
+        case PlayerAccessGrantGuard.apply_lazy_expiry_for_digest(Repo, digest) do
+          :ok -> :ok
+          {:error, reason} -> Repo.rollback(reason)
+        end
       end)
 
+    with {:ok, :ok} <- expiry_result do
+      exchange_after_expiry(digest)
+    else
+      _ -> {:error, :invalid_credentials}
+    end
+  end
+
+  def exchange(_), do: {:error, :invalid_credentials}
+
+  defp exchange_after_expiry(digest) do
     Repo.transaction(fn ->
       case PlayerAccessGrantGuard.find_usable_active_by_digest(Repo, digest) do
         {:ok, grant} -> grant
@@ -27,6 +40,4 @@ defmodule GolfScoring.Accounts.PlayerAccessExchange do
       {:error, _} -> {:error, :invalid_credentials}
     end
   end
-
-  def exchange(_), do: {:error, :invalid_credentials}
 end

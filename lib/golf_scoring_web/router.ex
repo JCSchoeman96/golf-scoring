@@ -50,12 +50,6 @@ defmodule GolfScoringWeb.Router do
     get "/access", AccessController, :exchange
   end
 
-  scope "/player", GolfScoringWeb.Player do
-    pipe_through [:browser, :require_player_access]
-
-    get "/", ProtectedController, :show
-  end
-
   scope "/admin" do
     pipe_through :browser
 

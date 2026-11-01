@@ -82,19 +82,6 @@ defmodule GolfScoringWeb.Player.AccessControllerTest do
     assert redirected_to(conn) == "/admin/sign-in"
   end
 
-  test "protected player route requires revalidated grant", %{conn: conn, setup: setup} do
-    {:ok, %{token: token}} =
-      Accounts.issue_player_access(setup.admin, setup.event.id, setup.player.id)
-
-    conn =
-      conn
-      |> get("/player/access?token=#{URI.encode(token)}")
-      |> get("/player/")
-
-    assert conn.status == 200
-    assert conn.resp_body =~ "player session active"
-  end
-
   defp setup_event_player! do
     event =
       GolfScoring.Competition.Event

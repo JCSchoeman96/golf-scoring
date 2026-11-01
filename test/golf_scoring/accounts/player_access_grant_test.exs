@@ -10,6 +10,7 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
   alias GolfScoring.Accounts
   alias GolfScoring.Accounts.PlayerAccessExchange
   alias GolfScoring.Accounts.PlayerAccessGrant
+  alias GolfScoring.Accounts.PlayerAccessGrantGuard
   alias GolfScoring.Accounts.PlayerAccessToken
   alias GolfScoring.Accounts.Services.IssuePlayerAccess
   alias GolfScoring.Accounts.Services.ReissuePlayerAccess
@@ -20,6 +21,7 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
   alias GolfScoring.Competition.Player
   alias GolfScoring.Competition.Services.ReplaceRoundEntry
   alias GolfScoring.Repo
+  alias GolfScoringWeb.Player.RequirePlayerAccess
   alias GolfScoringWeb.Player.Session
 
   @password "GLS-21 synthetic staff passphrase 2026"
@@ -242,7 +244,8 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
       |> get("/player/access?token=#{URI.encode(original_token)}")
       |> fetch_session()
 
-    assert Session.grant_id(conn)
+    grant_id = Session.grant_id(conn)
+    assert grant_id
 
     assert {:ok, %{token: _new_token}} =
              Accounts.reissue_player_access(setup.admin, setup.event.id, setup.player.id)
@@ -250,19 +253,35 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
     assert {:error, :invalid_credentials} =
              PlayerAccessExchange.exchange(original_token)
 
-    conn = conn |> recycle() |> get("/player/")
+    conn =
+      build_conn()
+      |> init_test_session(%{})
+      |> Session.put_grant_id(grant_id)
+      |> invoke_require_player_access()
+
     assert redirected_to(conn) == "/"
   end
 
-  test "reissue authorization includes scoring support" do
+  test "reissue authorization by staff role" do
     setup = setup_event_player!()
+    manager = create_staff_user!()
+    registration = create_staff_user!()
     scoring = create_staff_user!()
+    other = create_staff_user!()
+
+    assign_role!(setup.admin, setup.event, manager, :competition_manager)
+    assign_role!(setup.admin, setup.event, registration, :registration_staff)
     assign_role!(setup.admin, setup.event, scoring, :scoring_support)
 
     assert {:ok, _} = Accounts.issue_player_access(setup.admin, setup.event.id, setup.player.id)
 
-    assert {:ok, _} =
-             Accounts.reissue_player_access(scoring, setup.event.id, setup.player.id)
+    for staff <- [setup.admin, manager, registration, scoring] do
+      assert {:ok, _} =
+               Accounts.reissue_player_access(staff, setup.event.id, setup.player.id)
+    end
+
+    assert {:error, :forbidden} =
+             Accounts.reissue_player_access(other, setup.event.id, setup.player.id)
   end
 
   test "reissue audit exists without token or digest material" do
@@ -354,10 +373,19 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
     conn =
       build_conn()
       |> get("/player/access?token=#{URI.encode(token)}")
+      |> fetch_session()
+
+    grant_id = Session.grant_id(conn)
+    assert grant_id
 
     assert {:ok, _} = Accounts.revoke_player_access(setup.admin, setup.event.id, setup.player.id)
 
-    conn = conn |> recycle() |> get("/player/")
+    conn =
+      build_conn()
+      |> init_test_session(%{})
+      |> Session.put_grant_id(grant_id)
+      |> invoke_require_player_access()
+
     assert redirected_to(conn) == "/"
   end
 
@@ -437,14 +465,47 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
     conn =
       build_conn()
       |> get("/player/access?token=#{URI.encode(valid_token)}")
+      |> fetch_session()
+
+    grant_id = Session.grant_id(conn)
+    assert grant_id
 
     Repo.query!(
-      "UPDATE player_access_grants SET expires_at = $1 WHERE state = 'active'",
-      [DateTime.add(DateTime.utc_now(), -10, :second)]
+      "UPDATE player_access_grants SET expires_at = $1 WHERE id = $2::uuid",
+      [DateTime.add(DateTime.utc_now(), -10, :second), Ecto.UUID.dump!(grant_id)]
     )
 
-    conn = conn |> recycle() |> get("/player/")
+    conn =
+      build_conn()
+      |> init_test_session(%{})
+      |> Session.put_grant_id(grant_id)
+      |> invoke_require_player_access()
+
     assert redirected_to(conn) == "/"
+  end
+
+  test "failed lazy expiry persistence denies authorization without silent success" do
+    setup = setup_event_player!()
+    past = DateTime.add(DateTime.utc_now(), -60, :second)
+
+    assert {:ok, %{grant: grant, token: token}} =
+             Accounts.issue_player_access(setup.admin, setup.event.id, setup.player.id,
+               expires_at: past
+             )
+
+    install_lazy_expiry_failure_trigger!()
+
+    assert {:error, :invalid_credentials} = PlayerAccessExchange.exchange(token)
+
+    reloaded = Ash.get!(PlayerAccessGrant, grant.id, authorize?: false)
+    assert reloaded.state == :active
+
+    assert {:error, :invalid_player_session} =
+             PlayerAccessGrantGuard.load_grant_for_session(grant.id)
+
+    assert match?({:error, _}, lazy_expiry_grant_id_transaction(grant.id))
+
+    drop_lazy_expiry_failure_trigger!()
   end
 
   test "terminal historical rows remain preserved" do
@@ -691,6 +752,46 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantTest do
   defp drop_revoke_audit_failure_trigger! do
     Repo.query!("DROP TRIGGER IF EXISTS gls21_reject_revoke_audit ON audit_events")
     Repo.query!("DROP FUNCTION IF EXISTS gls21_reject_revoke_audit()")
+  end
+
+  defp install_lazy_expiry_failure_trigger! do
+    Repo.query!("""
+    CREATE FUNCTION gls21_reject_mark_expired() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+    BEGIN
+      IF OLD.state = 'active' AND NEW.state = 'expired' THEN
+        RAISE EXCEPTION 'simulated GLS-21 lazy expiry persistence failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $$
+    """)
+
+    Repo.query!("""
+    CREATE TRIGGER gls21_reject_mark_expired
+    BEFORE UPDATE ON player_access_grants
+    FOR EACH ROW EXECUTE FUNCTION gls21_reject_mark_expired()
+    """)
+  end
+
+  defp drop_lazy_expiry_failure_trigger! do
+    Repo.query!("DROP TRIGGER IF EXISTS gls21_reject_mark_expired ON player_access_grants")
+    Repo.query!("DROP FUNCTION IF EXISTS gls21_reject_mark_expired()")
+  end
+
+  defp lazy_expiry_grant_id_transaction(grant_id) do
+    Repo.transaction(fn ->
+      case PlayerAccessGrantGuard.apply_lazy_expiry_for_grant_id(Repo, grant_id) do
+        :ok -> :ok
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+  end
+
+  defp invoke_require_player_access(conn) do
+    conn
+    |> Plug.Conn.fetch_session()
+    |> RequirePlayerAccess.call(RequirePlayerAccess.init([]))
   end
 
   defp assign_role!(actor, event, staff, role) do
