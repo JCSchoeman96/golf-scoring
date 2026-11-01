@@ -26,7 +26,8 @@ defmodule GolfScoring.Scoring.Calculators.CourseHandicap do
 
     index_component =
       handicap_index
-      |> D.mult(D.div(slope, standard))
+      |> D.mult(slope)
+      |> D.div(standard)
       |> D.add(D.sub(course_rating, par_decimal))
 
     {:ok,

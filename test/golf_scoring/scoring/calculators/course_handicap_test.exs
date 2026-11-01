@@ -52,4 +52,20 @@ defmodule GolfScoring.Scoring.Calculators.CourseHandicapTest do
     assert D.compare(result.course_handicap_unrounded, D.new("9.5")) == :gt
     assert D.compare(result.course_handicap_unrounded, D.new("9.6")) == :lt
   end
+
+  test "multiply-before-divide preserves exact positive 0.5 course handicap tie" do
+    assert {:ok, result} =
+             CourseHandicap.calculate(D.new("11.3"), 62, D.new("66.3"), 72)
+
+    assert D.equal?(result.course_handicap_unrounded, D.new("0.5"))
+    assert result.course_handicap_rounded == 1
+  end
+
+  test "multiply-before-divide preserves exact negative 0.5 course handicap tie" do
+    assert {:ok, result} =
+             CourseHandicap.calculate(D.new("11.3"), 62, D.new("65.3"), 72)
+
+    assert D.equal?(result.course_handicap_unrounded, D.new("-0.5"))
+    assert result.course_handicap_rounded == 0
+  end
 end
