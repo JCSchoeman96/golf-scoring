@@ -17,9 +17,8 @@ defmodule GolfScoring.Accounts.PlayerAccessExchange do
         end
       end)
 
-    with {:ok, :ok} <- expiry_result do
-      exchange_after_expiry(digest)
-    else
+    case expiry_result do
+      {:ok, :ok} -> exchange_after_expiry(digest)
       _ -> {:error, :invalid_credentials}
     end
   end

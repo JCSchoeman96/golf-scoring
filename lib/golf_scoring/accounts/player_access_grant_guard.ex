@@ -185,22 +185,8 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantGuard do
            [Ecto.UUID.dump!(grant_id)]
          ).rows do
       [[id, event_id, player_id, state, expires_at]] ->
-        grant = %{
-          id: Ecto.UUID.cast!(id),
-          event_id: Ecto.UUID.cast!(event_id),
-          player_id: Ecto.UUID.cast!(player_id),
-          state: String.to_existing_atom(state),
-          expires_at: expires_at
-        }
-
-        if grant.state == :active do
-          case lazy_expire_if_due!(grant, now) do
-            {:ok, _} -> :ok
-            {:error, reason} -> {:error, reason}
-          end
-        else
-          :ok
-        end
+        grant = grant_row_to_map(id, event_id, player_id, state, expires_at)
+        active_grant_lazy_expiry(grant, now)
 
       [] ->
         :ok
@@ -210,28 +196,62 @@ defmodule GolfScoring.Accounts.PlayerAccessGrantGuard do
   @spec load_grant_for_session(Ecto.UUID.t(), DateTime.t()) ::
           {:ok, PlayerAccessGrant.t()} | {:error, :invalid_player_session}
   def load_grant_for_session(grant_id, now \\ DateTime.utc_now()) do
-    case Repo.transaction(fn ->
-           case apply_lazy_expiry_for_grant_id(Repo, grant_id, now) do
-             :ok -> :ok
-             {:error, reason} -> Repo.rollback(reason)
-           end
-         end) do
-      {:ok, :ok} ->
-        case Ash.get(PlayerAccessGrant, grant_id, authorize?: false) do
-          {:ok, grant} ->
-            if grant.state == :active and not grant_expired?(grant, now) do
-              {:ok, grant}
-            else
-              {:error, :invalid_player_session}
-            end
+    case run_lazy_expiry_for_session(grant_id, now) do
+      :ok -> load_usable_grant_for_session(grant_id, now)
+      :expiry_failed -> {:error, :invalid_player_session}
+    end
+  end
 
-          _ ->
-            {:error, :invalid_player_session}
+  defp active_grant_lazy_expiry(%{state: :active} = grant, now) do
+    case lazy_expire_if_due!(grant, now) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp active_grant_lazy_expiry(_grant, _now), do: :ok
+
+  defp run_lazy_expiry_for_session(grant_id, now) do
+    grant_id
+    |> lazy_expiry_for_session_tx(now)
+    |> transaction_lazy_expiry_result()
+  end
+
+  defp lazy_expiry_for_session_tx(grant_id, now) do
+    Repo.transaction(fn ->
+      apply_lazy_expiry_for_grant_id(Repo, grant_id, now)
+      |> lazy_expiry_tx_result()
+    end)
+  end
+
+  defp lazy_expiry_tx_result(:ok), do: :ok
+  defp lazy_expiry_tx_result({:error, reason}), do: Repo.rollback(reason)
+
+  defp transaction_lazy_expiry_result({:ok, :ok}), do: :ok
+  defp transaction_lazy_expiry_result({:error, _reason}), do: :expiry_failed
+
+  defp load_usable_grant_for_session(grant_id, now) do
+    case Ash.get(PlayerAccessGrant, grant_id, authorize?: false) do
+      {:ok, %{state: :active} = grant} ->
+        if grant_expired?(grant, now) do
+          {:error, :invalid_player_session}
+        else
+          {:ok, grant}
         end
 
-      {:error, _reason} ->
+      _ ->
         {:error, :invalid_player_session}
     end
+  end
+
+  defp grant_row_to_map(id, event_id, player_id, state, expires_at) do
+    %{
+      id: Ecto.UUID.cast!(id),
+      event_id: Ecto.UUID.cast!(event_id),
+      player_id: Ecto.UUID.cast!(player_id),
+      state: String.to_existing_atom(state),
+      expires_at: expires_at
+    }
   end
 
   defp mark_expired(grant_id) do
