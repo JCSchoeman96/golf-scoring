@@ -4,6 +4,7 @@ defmodule GolfScoring.Competition do
   use Ash.Domain
 
   alias GolfScoring.Competition.Services.AssignGroupRole
+  alias GolfScoring.Competition.Services.AssignRoundTee
   alias GolfScoring.Competition.Services.ConfigureRoundCompetition
   alias GolfScoring.Competition.Services.CreateCompetitionSide
   alias GolfScoring.Competition.Services.HandoverGroupRole
@@ -145,5 +146,15 @@ defmodule GolfScoring.Competition do
 
   def revoke_designated_verifier(actor, event_id, round_id, playing_group_id, reason) do
     RevokeGroupRole.run(actor, event_id, round_id, playing_group_id, :designated_verifier, reason)
+  end
+
+  def assign_round_tee(actor, event_id, round_id, round_entry_id, round_tee_profile_snapshot_id) do
+    AssignRoundTee.run(
+      actor,
+      event_id,
+      round_id,
+      round_entry_id,
+      round_tee_profile_snapshot_id
+    )
   end
 end

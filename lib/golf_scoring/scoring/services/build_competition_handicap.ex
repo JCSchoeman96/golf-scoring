@@ -1,0 +1,87 @@
+defmodule GolfScoring.Scoring.Services.BuildCompetitionHandicap do
+  @moduledoc false
+
+  require Ash.Query
+
+  alias Ash.Changeset
+  alias GolfScoring.Competition.RoundCompetition
+  alias GolfScoring.Repo
+  alias GolfScoring.Scoring.CompetitionHandicap
+  alias GolfScoring.Scoring.HandicapEntryLock
+  alias GolfScoring.Scoring.HandicapSnapshot
+
+  def run(round_entry_id, round_competition_id, attrs) when is_map(attrs) do
+    Repo.transaction(fn ->
+      with {:ok, entry} <- HandicapEntryLock.lock!(round_entry_id),
+           {:ok, snapshot} <- fetch_built_snapshot(entry.id),
+           {:ok, competition} <- load_competition(round_competition_id, entry.round_id),
+           :ok <- assert_snapshot_alignment(snapshot, entry),
+           {:ok, playing} <- require_field(attrs, :playing_handicap),
+           {:ok, policy} <- require_policy(attrs),
+           allowance_applied <- Map.get(attrs, :allowance_applied, true),
+           unrounded_allowed <- Map.get(attrs, :unrounded_allowed_handicap),
+           {:ok, row} <-
+             CompetitionHandicap
+             |> Changeset.for_create(:build_internal, %{
+               round_id: entry.round_id,
+               round_entry_id: entry.id,
+               round_competition_id: competition.id,
+               handicap_snapshot_id: snapshot.id,
+               handicap_allowance_percent: competition.handicap_allowance_percent,
+               allowance_applied: allowance_applied,
+               unrounded_allowed_handicap: unrounded_allowed,
+               playing_handicap: playing,
+               policy_identifier: policy
+             })
+             |> Ash.create(authorize?: false) do
+        row
+      else
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+    |> normalize_result()
+  end
+
+  defp fetch_built_snapshot(round_entry_id) do
+    case HandicapSnapshot
+         |> Ash.Query.filter(round_entry_id == ^round_entry_id)
+         |> Ash.read_one(authorize?: false) do
+      {:ok, %{built_at: built_at} = snapshot} when not is_nil(built_at) -> {:ok, snapshot}
+      {:ok, _} -> {:error, :handicap_snapshot_not_built}
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp load_competition(round_competition_id, round_id) do
+    case Ash.get(RoundCompetition, round_competition_id, authorize?: false) do
+      {:ok, competition} when competition.round_id == round_id -> {:ok, competition}
+      {:ok, _} -> {:error, :round_competition_mismatch}
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp assert_snapshot_alignment(snapshot, entry) do
+    if snapshot.round_entry_id == entry.id and snapshot.round_id == entry.round_id,
+      do: :ok,
+      else: {:error, :handicap_snapshot_mismatch}
+  end
+
+  defp require_field(attrs, key) do
+    case Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key)) do
+      nil -> {:error, {:required, key}}
+      value -> {:ok, value}
+    end
+  end
+
+  defp require_policy(attrs) do
+    case Map.get(attrs, :policy_identifier) || Map.get(attrs, "policy_identifier") do
+      nil -> {:error, :policy_identifier_required}
+      "" -> {:error, :policy_identifier_required}
+      value -> {:ok, String.trim(to_string(value))}
+    end
+  end
+
+  defp normalize_result({:ok, result}), do: {:ok, result}
+  defp normalize_result({:error, reason}), do: {:error, reason}
+  defp normalize_result({:error, :rollback, reason}), do: {:error, reason}
+end

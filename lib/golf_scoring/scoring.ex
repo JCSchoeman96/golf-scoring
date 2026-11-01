@@ -1,0 +1,41 @@
+defmodule GolfScoring.Scoring do
+  @moduledoc "Handicap snapshots and competition-specific playing handicaps."
+
+  use Ash.Domain
+
+  alias GolfScoring.Scoring.Services.ApplyNoHiPolicy
+  alias GolfScoring.Scoring.Services.BuildCompetitionHandicap
+  alias GolfScoring.Scoring.Services.BuildHandicapSnapshot
+  alias GolfScoring.Scoring.Services.ConfirmHandicapInput
+  alias GolfScoring.Scoring.Services.OverrideHandicapBasis
+
+  resources do
+    resource GolfScoring.Scoring.HandicapSnapshot
+    resource GolfScoring.Scoring.CompetitionHandicap
+  end
+
+  def confirm_handicap_input(actor, event_id, round_id, round_entry_id, attrs) do
+    ConfirmHandicapInput.run(actor, event_id, round_id, round_entry_id, attrs)
+  end
+
+  def confirm_handicap_input(actor, event_id, round_id, round_entry_id, attrs, opts)
+      when is_list(opts) do
+    ConfirmHandicapInput.run(actor, event_id, round_id, round_entry_id, attrs, opts)
+  end
+
+  def apply_no_hi_policy(actor, event_id, round_id, round_entry_id, attrs) do
+    ApplyNoHiPolicy.run(actor, event_id, round_id, round_entry_id, attrs)
+  end
+
+  def override_handicap_basis(actor, event_id, round_id, round_entry_id, attrs) do
+    OverrideHandicapBasis.run(actor, event_id, round_id, round_entry_id, attrs)
+  end
+
+  def build_handicap_snapshot(round_entry_id, attrs) do
+    BuildHandicapSnapshot.run(round_entry_id, attrs)
+  end
+
+  def build_competition_handicap(round_entry_id, round_competition_id, attrs) do
+    BuildCompetitionHandicap.run(round_entry_id, round_competition_id, attrs)
+  end
+end
