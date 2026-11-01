@@ -8,6 +8,8 @@ defmodule GolfScoring.Competition.Services.ConfigureRoundCompetition do
   alias GolfScoring.Accounts.EventAuthorityLock
   alias GolfScoring.Competition.RoundCompetition
   alias GolfScoring.Repo
+  alias GolfScoring.Scoring.HandicapRowLock
+  alias GolfScoring.Scoring.InvalidateDerived
 
   @manager_roles [:event_admin, :competition_manager]
   @pre_open_round_states ~w(draft ready)
@@ -79,9 +81,16 @@ defmodule GolfScoring.Competition.Services.ConfigureRoundCompetition do
         |> Ash.create(authorize?: false)
 
       {:ok, existing} ->
-        existing
-        |> Changeset.for_update(:update_configuration_internal, build_update_attrs(attrs))
-        |> Ash.update(authorize?: false)
+        with {:ok, locked} <-
+               HandicapRowLock.lock_round_competition!(existing.id, round.id),
+             old_allowance = normalize_allowance(locked.handicap_allowance_percent),
+             {:ok, updated} <-
+               existing
+               |> Changeset.for_update(:update_configuration_internal, build_update_attrs(attrs))
+               |> Ash.update(authorize?: false),
+             :ok <- maybe_invalidate_on_allowance_change(old_allowance, updated) do
+          {:ok, updated}
+        end
 
       {:error, error} ->
         {:error, error}
@@ -116,6 +125,20 @@ defmodule GolfScoring.Competition.Services.ConfigureRoundCompetition do
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
   end
+
+  defp maybe_invalidate_on_allowance_change(old_allowance, updated) do
+    new_allowance = normalize_allowance(updated.handicap_allowance_percent)
+
+    if old_allowance == new_allowance do
+      :ok
+    else
+      InvalidateDerived.for_round_competition(updated.id)
+    end
+  end
+
+  defp normalize_allowance(value) when is_integer(value), do: value
+
+  defp normalize_allowance(value) when is_binary(value), do: String.to_integer(value)
 
   defp normalize_result({:ok, result}), do: {:ok, result}
   defp normalize_result({:error, reason}), do: {:error, reason}

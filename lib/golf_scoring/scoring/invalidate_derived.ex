@@ -13,6 +13,11 @@ defmodule GolfScoring.Scoring.InvalidateDerived do
     invalidate_derived_state(round_entry_id, nil)
   end
 
+  @spec for_round_competition(Ecto.UUID.t()) :: :ok | {:error, term()}
+  def for_round_competition(round_competition_id) do
+    destroy_competition_handicaps_for_round_competition(round_competition_id)
+  end
+
   @spec realign_entry_tee!(Ecto.UUID.t(), Ecto.UUID.t()) :: :ok | {:error, term()}
   def realign_entry_tee!(round_entry_id, round_tee_profile_snapshot_id) do
     invalidate_derived_state(round_entry_id, round_tee_profile_snapshot_id)
@@ -28,6 +33,15 @@ defmodule GolfScoring.Scoring.InvalidateDerived do
     rows =
       CompetitionHandicap
       |> Ash.Query.filter(round_entry_id == ^round_entry_id)
+      |> Ash.read!(authorize?: false)
+
+    Enum.reduce_while(rows, :ok, &destroy_competition_row/2)
+  end
+
+  defp destroy_competition_handicaps_for_round_competition(round_competition_id) do
+    rows =
+      CompetitionHandicap
+      |> Ash.Query.filter(round_competition_id == ^round_competition_id)
       |> Ash.read!(authorize?: false)
 
     Enum.reduce_while(rows, :ok, &destroy_competition_row/2)
