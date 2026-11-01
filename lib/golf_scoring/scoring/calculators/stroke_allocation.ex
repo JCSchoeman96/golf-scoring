@@ -15,28 +15,27 @@ defmodule GolfScoring.Scoring.Calculators.StrokeAllocation do
   @spec allocate(integer(), list(map())) ::
           {:ok, %{strokes_by_round_hole_id: map()}} | {:error, atom()}
   def allocate(playing_handicap, holes) when is_list(holes) do
-    with :ok <- validate_holes(holes) do
-      strokes =
-        cond do
-          playing_handicap > 0 ->
-            allocate_positive(playing_handicap, holes)
+    with :ok <- validate_holes(holes),
+         {:ok, strokes_by_round_hole_id} <- allocate_strokes(playing_handicap, holes) do
+      {:ok, %{strokes_by_round_hole_id: strokes_by_round_hole_id}}
+    end
+  end
 
-          playing_handicap == 0 ->
-            zero_map(holes)
+  defp allocate_strokes(playing_handicap, holes) do
+    cond do
+      playing_handicap > 0 ->
+        {:ok, allocate_positive(playing_handicap, holes)}
 
-          playing_handicap >= -8 and playing_handicap <= -1 ->
-            with :ok <- validate_plus_stroke_allocation(holes) do
-              allocate_plus(playing_handicap, holes)
-            end
+      playing_handicap == 0 ->
+        {:ok, zero_map(holes)}
 
-          playing_handicap < -8 ->
-            {:error, :plus_playing_handicap_outside_authorized_range}
+      playing_handicap >= -8 and playing_handicap <= -1 ->
+        with :ok <- validate_plus_stroke_allocation(holes) do
+          {:ok, allocate_plus(playing_handicap, holes)}
         end
 
-      case strokes do
-        {:error, _} = error -> error
-        strokes_by_round_hole_id -> {:ok, %{strokes_by_round_hole_id: strokes_by_round_hole_id}}
-      end
+      playing_handicap < -8 ->
+        {:error, :plus_playing_handicap_outside_authorized_range}
     end
   end
 
