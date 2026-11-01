@@ -5,9 +5,12 @@ defmodule GolfScoring.Competition do
 
   alias GolfScoring.Competition.Services.AssignGroupRole
   alias GolfScoring.Competition.Services.AssignRoundTee
+  alias GolfScoring.Competition.Services.ConfigureMysteryHoleRule
   alias GolfScoring.Competition.Services.ConfigureRoundCompetition
+  alias GolfScoring.Competition.Services.ConfigureScoringTrack
   alias GolfScoring.Competition.Services.CreateCompetitionSide
   alias GolfScoring.Competition.Services.HandoverGroupRole
+  alias GolfScoring.Competition.Services.LockScoringTracksForRound
   alias GolfScoring.Competition.Services.RevokeGroupRole
   alias GolfScoring.Competition.Services.SetSideMembership
 
@@ -62,6 +65,12 @@ defmodule GolfScoring.Competition do
     resource GolfScoring.Competition.CompetitionSideMembership
     resource GolfScoring.Competition.CompetitionSideResult
     resource GolfScoring.Competition.GroupRoleAssignment
+
+    resource GolfScoring.Competition.ScoringTrack do
+      define :get_scoring_track_by_id, action: :read, get_by: [:id]
+    end
+
+    resource GolfScoring.Competition.MysteryHoleRule
   end
 
   def configure_round_competition(actor, event_id, round_id, attrs) do
@@ -156,5 +165,41 @@ defmodule GolfScoring.Competition do
       round_entry_id,
       round_tee_profile_snapshot_id
     )
+  end
+
+  def configure_scoring_track(actor, event_id, round_id, round_competition_id, attrs) do
+    ConfigureScoringTrack.run(actor, event_id, round_id, round_competition_id, attrs)
+  end
+
+  def configure_mystery_hole_rule(
+        actor,
+        event_id,
+        round_id,
+        scoring_track_id,
+        round_hole_id,
+        rule
+      ) do
+    ConfigureMysteryHoleRule.run(
+      actor,
+      event_id,
+      round_id,
+      scoring_track_id,
+      round_hole_id,
+      rule
+    )
+  end
+
+  def remove_mystery_hole_rule(actor, event_id, round_id, scoring_track_id, round_hole_id) do
+    ConfigureMysteryHoleRule.remove(
+      actor,
+      event_id,
+      round_id,
+      scoring_track_id,
+      round_hole_id
+    )
+  end
+
+  def lock_scoring_tracks_for_round(round_id) do
+    LockScoringTracksForRound.run(round_id)
   end
 end
