@@ -14,7 +14,10 @@ defmodule GolfScoring.Competition.RoundEntryTest do
   alias GolfScoring.Competition.Round
   alias GolfScoring.Competition.RoundEntry
   alias GolfScoring.Competition.Services.AssignEntryToGroup
+  alias GolfScoring.Competition.Services.AssignRoundTee
+  alias GolfScoring.Competition.Services.ConfigureRoundLayout
   alias GolfScoring.Competition.Services.ReplaceRoundEntry
+  alias GolfScoring.Competition.Services.SnapshotRoundTeeProfiles
   alias GolfScoring.Competition.StartingParticipant
   alias GolfScoring.Repo
 
@@ -834,13 +837,132 @@ defmodule GolfScoring.Competition.RoundEntryTest do
     assert status == "checked_in"
   end
 
+  test "assign_round_tee stores same-round snapshot on RoundEntry" do
+    %{event: event, round: round, admin: admin, player: player, course: course} = setup_round!()
+    holes = create_eighteen_holes!(event, admin, course)
+    white = create_tee_set!(event, admin, course, "White")
+    profile = create_profile!(event, admin, white, holes, "Men")
+
+    {:ok, _} =
+      ConfigureRoundLayout.run(
+        admin,
+        round.id,
+        Enum.map(holes, & &1.id)
+      )
+
+    {:ok, [snapshot]} =
+      SnapshotRoundTeeProfiles.run(admin, round.id, [
+        profile.id
+      ])
+
+    assert {:ok, entry} =
+             Competition.add_round_entry(event.id, round.id, player.id, actor: admin)
+
+    assert {:ok, assigned} =
+             AssignRoundTee.run(admin, event.id, round.id, entry.id, snapshot.id)
+
+    assert assigned.round_tee_profile_snapshot_id == snapshot.id
+  end
+
+  test "RoundEntry tee assignment rejects cross-round snapshot" do
+    setup_a = setup_round!()
+    setup_b = setup_round!()
+
+    holes = create_eighteen_holes!(setup_a.event, setup_a.admin, setup_a.course)
+    white = create_tee_set!(setup_a.event, setup_a.admin, setup_a.course, "White")
+    profile = create_profile!(setup_a.event, setup_a.admin, white, holes, "Men")
+
+    {:ok, _} =
+      ConfigureRoundLayout.run(
+        setup_a.admin,
+        setup_a.round.id,
+        Enum.map(holes, & &1.id)
+      )
+
+    {:ok, [snapshot]} =
+      SnapshotRoundTeeProfiles.run(
+        setup_a.admin,
+        setup_a.round.id,
+        [profile.id]
+      )
+
+    assert {:ok, entry} =
+             Competition.add_round_entry(
+               setup_b.event.id,
+               setup_b.round.id,
+               setup_b.player.id,
+               actor: setup_b.admin
+             )
+
+    assert {:error, :tee_snapshot_not_found} =
+             AssignRoundTee.run(
+               setup_b.admin,
+               setup_b.event.id,
+               setup_b.round.id,
+               entry.id,
+               snapshot.id
+             )
+  end
+
+  defp create_eighteen_holes!(event, admin, course) do
+    for n <- 1..18 do
+      {:ok, hole} =
+        GolfScoring.GolfCatalog.configure_course_hole(
+          event.id,
+          %{course_id: course.id, hole_number: n},
+          actor: admin
+        )
+
+      hole
+    end
+  end
+
+  defp create_tee_set!(event, admin, course, name) do
+    {:ok, tee_set} =
+      GolfScoring.GolfCatalog.configure_tee_set(
+        event.id,
+        %{course_id: course.id, name: name},
+        actor: admin
+      )
+
+    tee_set
+  end
+
+  defp create_profile!(event, admin, tee_set, holes, label) do
+    hole_ratings =
+      Enum.map(holes, fn hole ->
+        %{
+          course_hole_id: hole.id,
+          par: 4,
+          stroke_index: hole.hole_number,
+          distance_m: 300 + hole.hole_number
+        }
+      end)
+
+    {:ok, profile} =
+      GolfScoring.GolfCatalog.configure_tee_rating_profile(
+        event.id,
+        %{
+          tee_set_id: tee_set.id,
+          rating_label: label,
+          course_rating: Decimal.new("72.0"),
+          slope_rating: 113,
+          total_par: 72,
+          hole_ratings: hole_ratings
+        },
+        actor: admin
+      )
+
+    profile
+  end
+
   defp setup_round! do
     event = create_event!()
     admin = create_event_admin!(event)
     course = create_course!(event, admin)
     {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
     player = create_player!()
-    %{event: event, round: round, admin: admin, player: player}
+    %{event: event, round: round, admin: admin, player: player, course: course}
   end
 
   defp create_player!(attrs \\ %{}) do

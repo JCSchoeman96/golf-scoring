@@ -20,6 +20,11 @@ defmodule GolfScoring.Competition.RoundEntry do
         on_delete: :restrict,
         match_with: [round_id: :round_id],
         name: "round_entries_playing_group_same_round_fkey"
+
+      reference :round_tee_profile_snapshot,
+        on_delete: :restrict,
+        match_with: [round_id: :round_id],
+        name: "round_entries_round_tee_snapshot_same_round_fkey"
     end
 
     custom_indexes do
@@ -27,6 +32,7 @@ defmodule GolfScoring.Competition.RoundEntry do
       index [:round_id, :participation_status]
       index [:event_id]
       index [:round_id, :playing_group_id], name: "round_entries_round_id_playing_group_id_index"
+      index [:round_tee_profile_snapshot_id]
     end
 
     check_constraints do
@@ -103,6 +109,12 @@ defmodule GolfScoring.Competition.RoundEntry do
     update :assign_playing_group_internal do
       public? false
       accept [:playing_group_id]
+      require_atomic? false
+    end
+
+    update :assign_round_tee_internal do
+      public? false
+      accept [:round_tee_profile_snapshot_id]
       require_atomic? false
     end
   end
@@ -182,6 +194,12 @@ defmodule GolfScoring.Competition.RoundEntry do
     end
 
     belongs_to :playing_group, GolfScoring.Competition.PlayingGroup do
+      allow_nil? true
+      public? false
+      attribute_public? false
+    end
+
+    belongs_to :round_tee_profile_snapshot, GolfScoring.Competition.RoundTeeProfileSnapshot do
       allow_nil? true
       public? false
       attribute_public? false

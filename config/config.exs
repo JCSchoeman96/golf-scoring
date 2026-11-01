@@ -61,7 +61,8 @@ config :golf_scoring,
     GolfScoring.Accounts,
     GolfScoring.Audit,
     GolfScoring.Competition,
-    GolfScoring.GolfCatalog
+    GolfScoring.GolfCatalog,
+    GolfScoring.Scoring
   ]
 
 # Configure the endpoint
