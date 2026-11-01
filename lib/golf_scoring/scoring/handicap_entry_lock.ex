@@ -16,11 +16,12 @@ defmodule GolfScoring.Scoring.HandicapEntryLock do
            """,
            [Ecto.UUID.dump!(round_entry_id)]
          ).rows do
-      [[id, event_id, round_id, _player_id, participation, tee_snapshot_id]] ->
+      [[id, event_id, round_id, player_id, participation, tee_snapshot_id]] ->
         entry = %{
           id: Ecto.UUID.cast!(id),
           event_id: Ecto.UUID.cast!(event_id),
           round_id: Ecto.UUID.cast!(round_id),
+          player_id: Ecto.UUID.cast!(player_id),
           participation_status: String.to_existing_atom(participation),
           round_tee_profile_snapshot_id: cast_optional_uuid(tee_snapshot_id)
         }

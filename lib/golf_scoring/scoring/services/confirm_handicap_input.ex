@@ -18,11 +18,10 @@ defmodule GolfScoring.Scoring.Services.ConfirmHandicapInput do
       when is_map(actor) and is_map(attrs) and is_list(opts) do
     actor_id = Map.get(actor, :id)
     source = Keyword.get(opts, :basis_source, :official_or_preloaded)
-    confirmer = Keyword.get(opts, :confirmer, :staff)
 
     Repo.transaction(fn ->
       with {:ok, _scope} <- EventAuthorityLock.lock_scope!(event_id, [actor_id]),
-           :ok <- authorize(actor_id, event_id, confirmer),
+           :ok <- authorize_staff(actor_id, event_id),
            {:ok, entry} <- HandicapEntryLock.lock!(round_entry_id),
            :ok <- scope_entry(entry, round_id, event_id),
            :ok <- require_assigned_tee(entry),
@@ -34,8 +33,8 @@ defmodule GolfScoring.Scoring.Services.ConfirmHandicapInput do
                deemed_handicap_basis: nil,
                override_reason: nil,
                confirmed_at: DateTime.utc_now(),
-               confirmed_by_staff_user_id: staff_confirmer_id(confirmer, actor_id, entry.id),
-               confirmed_by_round_entry_id: entry_confirmer_id(confirmer, entry.id),
+               confirmed_by_staff_user_id: actor_id,
+               confirmed_by_round_entry_id: nil,
                source_reference: Map.get(attrs, :source_reference)
              }) do
         snapshot
@@ -46,15 +45,13 @@ defmodule GolfScoring.Scoring.Services.ConfirmHandicapInput do
     |> normalize_result()
   end
 
-  defp authorize(actor_id, event_id, :staff) do
+  defp authorize_staff(actor_id, event_id) do
     if ActiveEventRole.authorized?(actor_id, event_id, @manager_roles) do
       :ok
     else
       {:error, :forbidden}
     end
   end
-
-  defp authorize(_actor_id, _event_id, :player_entry), do: :ok
 
   defp scope_entry(entry, round_id, event_id) do
     if entry.round_id == round_id and entry.event_id == event_id,
@@ -73,12 +70,6 @@ defmodule GolfScoring.Scoring.Services.ConfirmHandicapInput do
     do: {:ok, hi}
 
   defp require_handicap_index(_), do: {:error, :source_handicap_index_required}
-
-  defp staff_confirmer_id(:staff, actor_id, _entry_id), do: actor_id
-  defp staff_confirmer_id(:player_entry, _actor_id, _entry_id), do: nil
-
-  defp entry_confirmer_id(:player_entry, entry_id), do: entry_id
-  defp entry_confirmer_id(:staff, _entry_id), do: nil
 
   defp normalize_result({:ok, result}), do: {:ok, result}
   defp normalize_result({:error, reason}), do: {:error, reason}

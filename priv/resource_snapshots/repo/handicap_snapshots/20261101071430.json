@@ -1,0 +1,552 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"gen_random_uuid()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "basis_source",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "source_handicap_index",
+      "type": "decimal"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "deemed_handicap_basis",
+      "type": "decimal"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "confirmed_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "source_reference",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "override_reason",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": 4,
+      "primary_key?": false,
+      "references": null,
+      "scale": 1,
+      "size": null,
+      "source": "course_rating",
+      "type": "decimal"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "slope_rating",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "applicable_par",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "course_handicap_unrounded",
+      "type": "decimal"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "course_handicap_rounded",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "built_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "updated_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "handicap_snapshots_round_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "rounds"
+      },
+      "scale": null,
+      "size": null,
+      "source": "round_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": {
+          "round_id": "round_id"
+        },
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "handicap_snapshots_round_entry_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "round_entries"
+      },
+      "scale": null,
+      "size": null,
+      "source": "round_entry_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": {
+          "round_id": "round_id"
+        },
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "handicap_snapshots_round_tee_profile_snapshot_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "round_tee_profile_snapshots"
+      },
+      "scale": null,
+      "size": null,
+      "source": "round_tee_profile_snapshot_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "handicap_snapshots_confirmed_by_staff_user_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "staff_users"
+      },
+      "scale": null,
+      "size": null,
+      "source": "confirmed_by_staff_user_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "handicap_snapshots_confirmed_by_round_entry_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "round_entries"
+      },
+      "scale": null,
+      "size": null,
+      "source": "confirmed_by_round_entry_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "basis_source"
+      ],
+      "base_filter": null,
+      "check": "basis_source IN ('official_or_preloaded', 'player_declared', 'committee_deemed', 'committee_override')",
+      "name": "handicap_snapshots_basis_source_valid"
+    },
+    {
+      "attribute": [
+        "basis_source"
+      ],
+      "base_filter": null,
+      "check": "(basis_source IN ('official_or_preloaded', 'player_declared')\n  AND source_handicap_index IS NOT NULL\n  AND deemed_handicap_basis IS NULL)\nOR\n(basis_source IN ('committee_deemed', 'committee_override')\n  AND deemed_handicap_basis IS NOT NULL\n  AND source_handicap_index IS NULL)\n",
+      "name": "handicap_snapshots_official_basis_shape"
+    },
+    {
+      "attribute": [
+        "basis_source"
+      ],
+      "base_filter": null,
+      "check": "(basis_source <> 'committee_override') OR (override_reason IS NOT NULL AND btrim(override_reason) <> '')",
+      "name": "handicap_snapshots_override_reason_required"
+    },
+    {
+      "attribute": [
+        "confirmed_at"
+      ],
+      "base_filter": null,
+      "check": "(\n  confirmed_at IS NULL\n  AND confirmed_by_staff_user_id IS NULL\n  AND confirmed_by_round_entry_id IS NULL\n)\nOR (\n  confirmed_at IS NOT NULL\n  AND (\n    (confirmed_by_staff_user_id IS NOT NULL)::int +\n    (confirmed_by_round_entry_id IS NOT NULL)::int\n  ) = 1\n)\n",
+      "name": "handicap_snapshots_confirmer_shape"
+    },
+    {
+      "attribute": [
+        "basis_source"
+      ],
+      "base_filter": null,
+      "check": "(basis_source <> 'committee_deemed')\nOR (source_reference IS NOT NULL AND btrim(source_reference) <> '')\n",
+      "name": "handicap_snapshots_committee_deemed_provenance"
+    },
+    {
+      "attribute": [
+        "confirmed_by_round_entry_id"
+      ],
+      "base_filter": null,
+      "check": "(confirmed_by_round_entry_id IS NULL) OR (confirmed_by_round_entry_id = round_entry_id)",
+      "name": "handicap_snapshots_player_confirmer_equals_entry"
+    },
+    {
+      "attribute": [
+        "course_handicap_unrounded"
+      ],
+      "base_filter": null,
+      "check": "(\n  built_at IS NULL\n  AND course_rating IS NULL\n  AND slope_rating IS NULL\n  AND applicable_par IS NULL\n  AND course_handicap_unrounded IS NULL\n  AND course_handicap_rounded IS NULL\n)\nOR (\n  built_at IS NOT NULL\n  AND course_rating IS NOT NULL\n  AND slope_rating IS NOT NULL\n  AND applicable_par IS NOT NULL\n  AND course_handicap_unrounded IS NOT NULL\n  AND course_handicap_rounded IS NOT NULL\n)\n",
+      "name": "handicap_snapshots_course_handicap_build_consistency"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "round_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "round_id"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": null,
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": false,
+      "using": null,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "round_entry_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "round_entry_id"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": null,
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": false,
+      "using": null,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "round_tee_profile_snapshot_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "round_tee_profile_snapshot_id"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": null,
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": false,
+      "using": null,
+      "where": null
+    }
+  ],
+  "custom_statements": [],
+  "has_create_action": true,
+  "hash": "7C63323E99F64DDC79F0FAFAA55D10B6EA5F8537C5AD98CA4627C9C0C1D71EA3",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "handicap_snapshots_unique_base_per_entry_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "round_entry_id"
+        }
+      ],
+      "name": "unique_base_per_entry",
+      "nils_distinct?": true,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "handicap_snapshots_unique_id_entry_round_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "id"
+        },
+        {
+          "type": "atom",
+          "value": "round_id"
+        },
+        {
+          "type": "atom",
+          "value": "round_entry_id"
+        }
+      ],
+      "name": "unique_id_entry_round",
+      "nils_distinct?": true,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "handicap_snapshots_unique_id_per_round_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "id"
+        },
+        {
+          "type": "atom",
+          "value": "round_id"
+        }
+      ],
+      "name": "unique_id_per_round",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.GolfScoring.Repo",
+  "schema": null,
+  "table": "handicap_snapshots",
+  "temporal": null
+}

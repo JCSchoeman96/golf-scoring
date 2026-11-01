@@ -3,6 +3,7 @@ defmodule GolfScoring.Scoring.Services.ApplyNoHiPolicy do
 
   alias GolfScoring.Accounts.Checks.ActiveEventRole
   alias GolfScoring.Accounts.EventAuthorityLock
+  alias GolfScoring.Competition.Player
   alias GolfScoring.Repo
   alias GolfScoring.Scoring.HandicapEntryLock
   alias GolfScoring.Scoring.Services.HandicapBasisSupport
@@ -19,7 +20,9 @@ defmodule GolfScoring.Scoring.Services.ApplyNoHiPolicy do
            {:ok, entry} <- HandicapEntryLock.lock!(round_entry_id),
            :ok <- scope_entry(entry, round_id, event_id),
            :ok <- require_assigned_tee(entry),
+           :ok <- require_player_without_handicap_index(entry.player_id),
            {:ok, deemed} <- require_explicit_deemed(attrs),
+           {:ok, provenance} <- require_provenance(attrs),
            {:ok, snapshot} <-
              HandicapBasisSupport.upsert_configured!(entry, %{
                basis_source: :committee_deemed,
@@ -29,8 +32,7 @@ defmodule GolfScoring.Scoring.Services.ApplyNoHiPolicy do
                confirmed_at: DateTime.utc_now(),
                confirmed_by_staff_user_id: actor_id,
                confirmed_by_round_entry_id: nil,
-               source_reference:
-                 Map.get(attrs, :source_reference) || Map.get(attrs, :policy_reference)
+               source_reference: provenance
              }) do
         snapshot
       else
@@ -57,6 +59,14 @@ defmodule GolfScoring.Scoring.Services.ApplyNoHiPolicy do
 
   defp require_assigned_tee(%{round_tee_profile_snapshot_id: _}), do: :ok
 
+  defp require_player_without_handicap_index(player_id) do
+    case Ash.get(Player, player_id, authorize?: false) do
+      {:ok, %{latest_handicap_index: nil}} -> :ok
+      {:ok, %{latest_handicap_index: _}} -> {:error, :player_has_handicap_index}
+      {:error, error} -> {:error, error}
+    end
+  end
+
   defp require_explicit_deemed(%{deemed_handicap_basis: deemed}) when not is_nil(deemed),
     do: {:ok, deemed}
 
@@ -64,6 +74,28 @@ defmodule GolfScoring.Scoring.Services.ApplyNoHiPolicy do
     do: {:ok, deemed}
 
   defp require_explicit_deemed(_), do: {:error, :deemed_handicap_basis_required}
+
+  defp require_provenance(attrs) do
+    reference =
+      Map.get(attrs, :source_reference) ||
+        Map.get(attrs, "source_reference") ||
+        Map.get(attrs, :policy_reference) ||
+        Map.get(attrs, "policy_reference")
+
+    case reference do
+      ref when is_binary(ref) ->
+        trimmed = String.trim(ref)
+
+        if trimmed == "" do
+          {:error, :provenance_reference_required}
+        else
+          {:ok, trimmed}
+        end
+
+      _ ->
+        {:error, :provenance_reference_required}
+    end
+  end
 
   defp normalize_result({:ok, result}), do: {:ok, result}
   defp normalize_result({:error, reason}), do: {:error, reason}

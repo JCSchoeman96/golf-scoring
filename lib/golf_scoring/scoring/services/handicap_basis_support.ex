@@ -9,8 +9,12 @@ defmodule GolfScoring.Scoring.Services.HandicapBasisSupport do
 
   @spec upsert_configured!(map(), map()) :: {:ok, HandicapSnapshot.t()} | {:error, term()}
   def upsert_configured!(entry, attrs) do
-    _ = InvalidateDerived.for_entry(entry.id)
+    with :ok <- InvalidateDerived.for_entry(entry.id) do
+      upsert_after_invalidation(entry, attrs)
+    end
+  end
 
+  defp upsert_after_invalidation(entry, attrs) do
     case HandicapSnapshot
          |> Ash.Query.filter(round_entry_id == ^entry.id)
          |> Ash.read_one(authorize?: false) do

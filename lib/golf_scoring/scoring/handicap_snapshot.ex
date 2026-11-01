@@ -67,13 +67,27 @@ defmodule GolfScoring.Scoring.HandicapSnapshot do
 
       check_constraint :confirmed_at, "handicap_snapshots_confirmer_shape",
         check: """
-        (confirmed_at IS NULL)
+        (
+          confirmed_at IS NULL
+          AND confirmed_by_staff_user_id IS NULL
+          AND confirmed_by_round_entry_id IS NULL
+        )
         OR (
-          ((confirmed_by_staff_user_id IS NOT NULL)::int +
-           (confirmed_by_round_entry_id IS NOT NULL)::int) = 1
+          confirmed_at IS NOT NULL
+          AND (
+            (confirmed_by_staff_user_id IS NOT NULL)::int +
+            (confirmed_by_round_entry_id IS NOT NULL)::int
+          ) = 1
         )
         """,
-        message: "confirmer must be exactly one staff user or round entry"
+        message: "confirmation facts must be absent together or complete together"
+
+      check_constraint :basis_source, "handicap_snapshots_committee_deemed_provenance",
+        check: """
+        (basis_source <> 'committee_deemed')
+        OR (source_reference IS NOT NULL AND btrim(source_reference) <> '')
+        """,
+        message: "committee deemed basis requires provenance reference"
 
       check_constraint :confirmed_by_round_entry_id,
                        "handicap_snapshots_player_confirmer_equals_entry",
@@ -84,15 +98,25 @@ defmodule GolfScoring.Scoring.HandicapSnapshot do
       check_constraint :course_handicap_unrounded,
                        "handicap_snapshots_course_handicap_build_consistency",
                        check: """
-                       (course_handicap_unrounded IS NULL
+                       (
+                         built_at IS NULL
+                         AND course_rating IS NULL
+                         AND slope_rating IS NULL
+                         AND applicable_par IS NULL
+                         AND course_handicap_unrounded IS NULL
                          AND course_handicap_rounded IS NULL
-                         AND built_at IS NULL)
-                       OR
-                       (course_handicap_unrounded IS NOT NULL
+                       )
+                       OR (
+                         built_at IS NOT NULL
+                         AND course_rating IS NOT NULL
+                         AND slope_rating IS NOT NULL
+                         AND applicable_par IS NOT NULL
+                         AND course_handicap_unrounded IS NOT NULL
                          AND course_handicap_rounded IS NOT NULL
-                         AND built_at IS NOT NULL)
+                       )
                        """,
-                       message: "course handicap fields must be absent or complete together"
+                       message:
+                         "built snapshot must include tee facts and course handicap outputs together"
     end
   end
 
@@ -155,6 +179,20 @@ defmodule GolfScoring.Scoring.HandicapSnapshot do
         :course_handicap_rounded,
         :built_at
       ]
+    end
+
+    update :realign_round_tee_internal do
+      public? false
+      require_atomic? false
+
+      accept [:round_tee_profile_snapshot_id]
+
+      change set_attribute(:course_rating, nil)
+      change set_attribute(:slope_rating, nil)
+      change set_attribute(:applicable_par, nil)
+      change set_attribute(:course_handicap_unrounded, nil)
+      change set_attribute(:course_handicap_rounded, nil)
+      change set_attribute(:built_at, nil)
     end
 
     update :invalidate_built_internal do

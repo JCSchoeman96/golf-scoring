@@ -15,7 +15,9 @@ defmodule GolfScoring.Competition.RoundEntryTest do
   alias GolfScoring.Competition.RoundEntry
   alias GolfScoring.Competition.Services.AssignEntryToGroup
   alias GolfScoring.Competition.Services.AssignRoundTee
+  alias GolfScoring.Competition.Services.ConfigureRoundLayout
   alias GolfScoring.Competition.Services.ReplaceRoundEntry
+  alias GolfScoring.Competition.Services.SnapshotRoundTeeProfiles
   alias GolfScoring.Competition.StartingParticipant
   alias GolfScoring.Repo
 
@@ -842,14 +844,14 @@ defmodule GolfScoring.Competition.RoundEntryTest do
     profile = create_profile!(event, admin, white, holes, "Men")
 
     {:ok, _} =
-      GolfScoring.Competition.Services.ConfigureRoundLayout.run(
+      ConfigureRoundLayout.run(
         admin,
         round.id,
         Enum.map(holes, & &1.id)
       )
 
     {:ok, [snapshot]} =
-      GolfScoring.Competition.Services.SnapshotRoundTeeProfiles.run(admin, round.id, [
+      SnapshotRoundTeeProfiles.run(admin, round.id, [
         profile.id
       ])
 
@@ -871,14 +873,14 @@ defmodule GolfScoring.Competition.RoundEntryTest do
     profile = create_profile!(setup_a.event, setup_a.admin, white, holes, "Men")
 
     {:ok, _} =
-      GolfScoring.Competition.Services.ConfigureRoundLayout.run(
+      ConfigureRoundLayout.run(
         setup_a.admin,
         setup_a.round.id,
         Enum.map(holes, & &1.id)
       )
 
     {:ok, [snapshot]} =
-      GolfScoring.Competition.Services.SnapshotRoundTeeProfiles.run(
+      SnapshotRoundTeeProfiles.run(
         setup_a.admin,
         setup_a.round.id,
         [profile.id]

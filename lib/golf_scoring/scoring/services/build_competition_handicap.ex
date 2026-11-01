@@ -4,21 +4,23 @@ defmodule GolfScoring.Scoring.Services.BuildCompetitionHandicap do
   require Ash.Query
 
   alias Ash.Changeset
-  alias GolfScoring.Competition.RoundCompetition
   alias GolfScoring.Repo
   alias GolfScoring.Scoring.CompetitionHandicap
   alias GolfScoring.Scoring.HandicapEntryLock
+  alias GolfScoring.Scoring.HandicapRowLock
   alias GolfScoring.Scoring.HandicapSnapshot
 
   def run(round_entry_id, round_competition_id, attrs) when is_map(attrs) do
     Repo.transaction(fn ->
       with {:ok, entry} <- HandicapEntryLock.lock!(round_entry_id),
+           {:ok, _locked_snapshot} <- HandicapRowLock.lock_handicap_snapshot!(entry.id),
            {:ok, snapshot} <- fetch_built_snapshot(entry.id),
-           {:ok, competition} <- load_competition(round_competition_id, entry.round_id),
+           {:ok, competition} <-
+             HandicapRowLock.lock_round_competition!(round_competition_id, entry.round_id),
            :ok <- assert_snapshot_alignment(snapshot, entry),
            {:ok, playing} <- require_field(attrs, :playing_handicap),
            {:ok, policy} <- require_policy(attrs),
-           allowance_applied <- Map.get(attrs, :allowance_applied, true),
+           {:ok, allowance_applied} <- require_allowance_applied(attrs),
            unrounded_allowed <- Map.get(attrs, :unrounded_allowed_handicap),
            {:ok, row} <-
              CompetitionHandicap
@@ -52,14 +54,6 @@ defmodule GolfScoring.Scoring.Services.BuildCompetitionHandicap do
     end
   end
 
-  defp load_competition(round_competition_id, round_id) do
-    case Ash.get(RoundCompetition, round_competition_id, authorize?: false) do
-      {:ok, competition} when competition.round_id == round_id -> {:ok, competition}
-      {:ok, _} -> {:error, :round_competition_mismatch}
-      {:error, error} -> {:error, error}
-    end
-  end
-
   defp assert_snapshot_alignment(snapshot, entry) do
     if snapshot.round_entry_id == entry.id and snapshot.round_id == entry.round_id,
       do: :ok,
@@ -78,6 +72,19 @@ defmodule GolfScoring.Scoring.Services.BuildCompetitionHandicap do
       nil -> {:error, :policy_identifier_required}
       "" -> {:error, :policy_identifier_required}
       value -> {:ok, String.trim(to_string(value))}
+    end
+  end
+
+  defp require_allowance_applied(attrs) do
+    case Map.fetch(attrs, :allowance_applied) do
+      {:ok, value} when is_boolean(value) ->
+        {:ok, value}
+
+      :error ->
+        case Map.fetch(attrs, "allowance_applied") do
+          {:ok, value} when is_boolean(value) -> {:ok, value}
+          _ -> {:error, :allowance_applied_required}
+        end
     end
   end
 

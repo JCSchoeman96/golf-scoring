@@ -7,13 +7,16 @@ defmodule GolfScoring.Scoring.Services.BuildHandicapSnapshot do
   alias GolfScoring.Competition.RoundTeeProfileSnapshot
   alias GolfScoring.Repo
   alias GolfScoring.Scoring.HandicapEntryLock
+  alias GolfScoring.Scoring.HandicapRowLock
   alias GolfScoring.Scoring.HandicapSnapshot
 
   def run(round_entry_id, attrs) when is_map(attrs) do
     Repo.transaction(fn ->
       with {:ok, entry} <- HandicapEntryLock.lock!(round_entry_id),
+           {:ok, _locked} <- HandicapRowLock.lock_handicap_snapshot!(entry.id),
            {:ok, snapshot} <- fetch_configured_snapshot(entry.id),
-           {:ok, tee} <- load_tee_snapshot(snapshot.round_tee_profile_snapshot_id, entry.round_id),
+           :ok <- assert_tee_alignment(snapshot, entry),
+           {:ok, tee} <- load_tee_snapshot(entry.round_tee_profile_snapshot_id, entry.round_id),
            {:ok, unrounded} <- require_field(attrs, :course_handicap_unrounded),
            {:ok, rounded} <- require_field(attrs, :course_handicap_rounded),
            {:ok, built} <-
@@ -42,6 +45,14 @@ defmodule GolfScoring.Scoring.Services.BuildHandicapSnapshot do
       {:ok, nil} -> {:error, :handicap_not_configured}
       {:ok, snapshot} -> {:ok, snapshot}
       {:error, error} -> {:error, error}
+    end
+  end
+
+  defp assert_tee_alignment(snapshot, entry) do
+    if snapshot.round_tee_profile_snapshot_id == entry.round_tee_profile_snapshot_id do
+      :ok
+    else
+      {:error, :handicap_snapshot_tee_mismatch}
     end
   end
 

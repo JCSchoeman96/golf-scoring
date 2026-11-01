@@ -21,7 +21,7 @@ defmodule GolfScoring.Competition.Services.AssignRoundTee do
            :ok <- authorize(actor_id, event_id),
            :ok <- authorize_snapshot(round_tee_profile_snapshot_id, round_id),
            {:ok, entry} <- lock_entry(round_entry_id, round_id, event_id),
-           :ok <- InvalidateDerived.for_entry(entry.id),
+           :ok <- InvalidateDerived.realign_entry_tee!(entry.id, round_tee_profile_snapshot_id),
            {:ok, updated} <- assign_tee(entry, round_tee_profile_snapshot_id) do
         updated
       else

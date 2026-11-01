@@ -7,6 +7,7 @@ defmodule GolfScoring.Scoring do
   alias GolfScoring.Scoring.Services.BuildCompetitionHandicap
   alias GolfScoring.Scoring.Services.BuildHandicapSnapshot
   alias GolfScoring.Scoring.Services.ConfirmHandicapInput
+  alias GolfScoring.Scoring.Services.ConfirmHandicapInputForPlayerGrant
   alias GolfScoring.Scoring.Services.OverrideHandicapBasis
 
   resources do
@@ -21,6 +22,10 @@ defmodule GolfScoring.Scoring do
   def confirm_handicap_input(actor, event_id, round_id, round_entry_id, attrs, opts)
       when is_list(opts) do
     ConfirmHandicapInput.run(actor, event_id, round_id, round_entry_id, attrs, opts)
+  end
+
+  def confirm_handicap_input_for_player_grant(grant_id, round_id, round_entry_id, attrs) do
+    ConfirmHandicapInputForPlayerGrant.run(grant_id, round_id, round_entry_id, attrs)
   end
 
   def apply_no_hi_policy(actor, event_id, round_id, round_entry_id, attrs) do

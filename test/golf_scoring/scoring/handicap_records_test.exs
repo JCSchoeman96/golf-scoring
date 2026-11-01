@@ -162,23 +162,241 @@ defmodule GolfScoring.Scoring.HandicapRecordsTest do
     assert is_nil(deemed.source_handicap_index)
   end
 
-  test "player declared source records round entry confirmer" do
+  test "staff cannot forge player round entry confirmer provenance" do
     setup = setup_round_with_tees!(assign_tee: true)
 
-    assert {:ok, snapshot} =
+    assert {:ok, staff_snapshot} =
              Scoring.confirm_handicap_input(
                setup.admin,
                setup.event.id,
                setup.round.id,
                setup.entry.id,
                %{source_handicap_index: D.new("8.1")},
+               basis_source: :player_declared
+             )
+
+    assert staff_snapshot.basis_source == :player_declared
+    assert staff_snapshot.confirmed_by_staff_user_id == setup.admin.id
+    assert is_nil(staff_snapshot.confirmed_by_round_entry_id)
+
+    assert {:ok, ignored_confirmer} =
+             Scoring.confirm_handicap_input(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.entry.id,
+               %{source_handicap_index: D.new("8.2")},
                basis_source: :player_declared,
                confirmer: :player_entry
+             )
+
+    assert ignored_confirmer.confirmed_by_staff_user_id == setup.admin.id
+    assert is_nil(ignored_confirmer.confirmed_by_round_entry_id)
+  end
+
+  test "active player grant confirms only matching round entry" do
+    setup = setup_round_with_tees!(assign_tee: true)
+
+    assert {:ok, %{grant: grant}} =
+             Accounts.issue_player_access(setup.admin, setup.event.id, setup.entry.player_id)
+
+    assert {:ok, snapshot} =
+             Scoring.confirm_handicap_input_for_player_grant(
+               grant.id,
+               setup.round.id,
+               setup.entry.id,
+               %{source_handicap_index: D.new("9.4")}
              )
 
     assert snapshot.basis_source == :player_declared
     assert snapshot.confirmed_by_round_entry_id == setup.entry.id
     assert is_nil(snapshot.confirmed_by_staff_user_id)
+  end
+
+  test "player grant cannot confirm another player's entry" do
+    setup = setup_round_with_tees!(profiles: 2, entries: 2, assign_tee: true)
+    [entry_a, entry_b] = setup.entries
+
+    assert {:ok, %{grant: grant}} =
+             Accounts.issue_player_access(setup.admin, setup.event.id, entry_a.player_id)
+
+    assert {:error, :invalid_player_session} =
+             Scoring.confirm_handicap_input_for_player_grant(
+               grant.id,
+               setup.round.id,
+               entry_b.id,
+               %{source_handicap_index: D.new("7.0")}
+             )
+  end
+
+  test "revoked grant cannot confirm handicap input" do
+    setup = setup_round_with_tees!(assign_tee: true)
+
+    assert {:ok, %{grant: grant}} =
+             Accounts.issue_player_access(setup.admin, setup.event.id, setup.entry.player_id)
+
+    assert {:ok, _} =
+             Accounts.revoke_player_access(setup.admin, setup.event.id, setup.entry.player_id)
+
+    assert {:error, :invalid_player_session} =
+             Scoring.confirm_handicap_input_for_player_grant(
+               grant.id,
+               setup.round.id,
+               setup.entry.id,
+               %{source_handicap_index: D.new("6.0")}
+             )
+  end
+
+  test "committee deemed requires nonblank provenance" do
+    setup = setup_round_with_tees!(assign_tee: true)
+
+    assert {:error, :provenance_reference_required} =
+             Scoring.apply_no_hi_policy(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.entry.id,
+               %{deemed_handicap_basis: D.new("18.0")}
+             )
+
+    assert {:error, :provenance_reference_required} =
+             Scoring.apply_no_hi_policy(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.entry.id,
+               %{deemed_handicap_basis: D.new("18.0"), policy_reference: "   "}
+             )
+  end
+
+  test "apply_no_hi_policy rejects players with existing handicap index" do
+    setup = setup_round_with_tees!(assign_tee: true)
+
+    Repo.query!(
+      "UPDATE players SET latest_handicap_index = $1::numeric WHERE id = $2::uuid",
+      [D.new("12.0"), Ecto.UUID.dump!(setup.entry.player_id)]
+    )
+
+    assert {:error, :player_has_handicap_index} =
+             Scoring.apply_no_hi_policy(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.entry.id,
+               %{deemed_handicap_basis: D.new("18.0"), policy_reference: "committee discretion"}
+             )
+  end
+
+  test "build_competition_handicap requires explicit allowance_applied" do
+    setup = setup_round_with_tees!(assign_tee: true, competition: true)
+    build_built_snapshot!(setup)
+
+    assert {:error, :allowance_applied_required} =
+             Scoring.build_competition_handicap(setup.entry.id, setup.competition.id, %{
+               playing_handicap: 8,
+               policy_identifier: "policy_a"
+             })
+  end
+
+  test "tee reassignment realigns snapshot tee and clears derived handicap output" do
+    setup = setup_round_with_tees!(profiles: 2, assign_tee: true, competition: true)
+    build_built_snapshot!(setup)
+
+    assert {:ok, _} =
+             Scoring.build_competition_handicap(setup.entry.id, setup.competition.id, %{
+               playing_handicap: 7,
+               policy_identifier: "policy_keep",
+               allowance_applied: true
+             })
+
+    assert competition_count(setup.entry.id) == 1
+
+    assert {:ok, _} =
+             Competition.assign_round_tee(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.entry.id,
+               setup.tee_b.id
+             )
+
+    snapshot = fetch_snapshot!(setup.entry.id)
+    assert snapshot.round_tee_profile_snapshot_id == setup.tee_b.id
+    assert is_nil(snapshot.built_at)
+    assert is_nil(snapshot.course_rating)
+    assert competition_count(setup.entry.id) == 0
+
+    assert {:ok, rebuilt} =
+             Scoring.build_handicap_snapshot(setup.entry.id, %{
+               course_handicap_unrounded: D.new("13.0"),
+               course_handicap_rounded: 13
+             })
+
+    assert rebuilt.course_rating == setup.tee_b.course_rating
+    assert rebuilt.slope_rating == setup.tee_b.slope_rating
+    assert rebuilt.applicable_par == setup.tee_b.applicable_par
+  end
+
+  test "basis mutation rolls back when derived invalidation fails" do
+    setup = setup_round_with_tees!(assign_tee: true, competition: true)
+    build_built_snapshot!(setup)
+
+    assert {:ok, _} =
+             Scoring.build_competition_handicap(setup.entry.id, setup.competition.id, %{
+               playing_handicap: 7,
+               policy_identifier: "policy_keep",
+               allowance_applied: false
+             })
+
+    before = fetch_snapshot!(setup.entry.id)
+    assert before.built_at
+    assert competition_count(setup.entry.id) == 1
+
+    install_competition_handicap_destroy_failure_trigger!()
+
+    on_exit(fn -> drop_competition_handicap_destroy_failure_trigger!() end)
+
+    assert {:error, _reason} =
+             Scoring.override_handicap_basis(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.entry.id,
+               %{deemed_handicap_basis: D.new("13.0"), override_reason: "correct basis"}
+             )
+
+    after_snapshot = fetch_snapshot!(setup.entry.id)
+    assert after_snapshot.basis_source == before.basis_source
+    assert after_snapshot.built_at
+    assert after_snapshot.course_handicap_rounded == before.course_handicap_rounded
+    assert competition_count(setup.entry.id) == 1
+  end
+
+  test "PostgreSQL rejects asymmetric confirmation facts" do
+    setup = setup_round_with_tees!(assign_tee: true)
+
+    assert {:ok, _} =
+             Scoring.confirm_handicap_input(
+               setup.admin,
+               setup.event.id,
+               setup.round.id,
+               setup.entry.id,
+               %{source_handicap_index: D.new("7.0")}
+             )
+
+    error =
+      assert_raise Postgrex.Error, fn ->
+        Repo.query!(
+          """
+          UPDATE handicap_snapshots
+          SET confirmed_at = NULL, confirmed_by_staff_user_id = $1::uuid
+          WHERE round_entry_id = $2::uuid
+          """,
+          [Ecto.UUID.dump!(setup.admin.id), Ecto.UUID.dump!(setup.entry.id)]
+        )
+      end
+
+    assert error.postgres.constraint == "handicap_snapshots_confirmer_shape"
   end
 
   test "missing HI does not silently default to 14 or 20" do
@@ -417,7 +635,8 @@ defmodule GolfScoring.Scoring.HandicapRecordsTest do
     assert {:ok, first} =
              Scoring.build_competition_handicap(setup.entry.id, setup.competition.id, %{
                playing_handicap: 8,
-               policy_identifier: "policy_a"
+               policy_identifier: "policy_a",
+               allowance_applied: false
              })
 
     error =
@@ -449,7 +668,8 @@ defmodule GolfScoring.Scoring.HandicapRecordsTest do
     assert {:ok, _} =
              Scoring.build_competition_handicap(setup.entry.id, setup.competition.id, %{
                playing_handicap: 7,
-               policy_identifier: "policy_keep"
+               policy_identifier: "policy_keep",
+               allowance_applied: true
              })
 
     assert competition_count(setup.entry.id) == 1
@@ -698,7 +918,7 @@ defmodule GolfScoring.Scoring.HandicapRecordsTest do
     tee_set
   end
 
-  defp create_profile!(event, admin, tee_set, holes, label, opts \\ []) do
+  defp create_profile!(event, admin, tee_set, holes, label, opts) do
     par = Keyword.get(opts, :par, 4)
     slope = Keyword.get(opts, :slope, 113)
 
@@ -727,5 +947,30 @@ defmodule GolfScoring.Scoring.HandicapRecordsTest do
       )
 
     profile
+  end
+
+  defp install_competition_handicap_destroy_failure_trigger! do
+    Repo.query!("""
+    CREATE FUNCTION gls22_reject_competition_handicap_delete() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+    BEGIN
+      RAISE EXCEPTION 'gls22_invalidation_blocked';
+    END;
+    $$
+    """)
+
+    Repo.query!("""
+    CREATE TRIGGER gls22_reject_competition_handicap_delete
+    BEFORE DELETE ON competition_handicaps
+    FOR EACH ROW EXECUTE FUNCTION gls22_reject_competition_handicap_delete()
+    """)
+  end
+
+  defp drop_competition_handicap_destroy_failure_trigger! do
+    Repo.query!(
+      "DROP TRIGGER IF EXISTS gls22_reject_competition_handicap_delete ON competition_handicaps"
+    )
+
+    Repo.query!("DROP FUNCTION IF EXISTS gls22_reject_competition_handicap_delete()")
   end
 end
