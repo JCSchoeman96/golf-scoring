@@ -44,16 +44,39 @@ defmodule GolfScoring.Scoring.Calculators.StrokeAllocation do
       length(holes) != @expected_hole_count ->
         {:error, :invalid_hole_set}
 
-      length(Enum.uniq(Enum.map(holes, &Map.fetch!(&1, :round_hole_id)))) != @expected_hole_count ->
+      not Enum.all?(holes, &hole_fact_valid?/1) ->
         {:error, :invalid_hole_set}
 
-      MapSet.new(Enum.map(holes, &Map.fetch!(&1, :stroke_index))) !=
-          MapSet.new(@expected_stroke_indices) ->
+      length(unique_round_hole_ids(holes)) != @expected_hole_count ->
+        {:error, :invalid_hole_set}
+
+      MapSet.new(stroke_indices(holes)) != MapSet.new(@expected_stroke_indices) ->
         {:error, :invalid_hole_set}
 
       true ->
         :ok
     end
+  end
+
+  defp hole_fact_valid?(hole) do
+    case {Map.get(hole, :round_hole_id), Map.get(hole, :stroke_index)} do
+      {round_hole_id, stroke_index}
+      when not is_nil(round_hole_id) and is_integer(stroke_index) ->
+        true
+
+      _ ->
+        false
+    end
+  end
+
+  defp unique_round_hole_ids(holes) do
+    holes
+    |> Enum.map(&Map.get(&1, :round_hole_id))
+    |> Enum.uniq()
+  end
+
+  defp stroke_indices(holes) do
+    Enum.map(holes, &Map.get(&1, :stroke_index))
   end
 
   defp validate_plus_stroke_allocation(holes) do

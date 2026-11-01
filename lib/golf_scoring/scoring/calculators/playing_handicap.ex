@@ -11,7 +11,7 @@ defmodule GolfScoring.Scoring.Calculators.PlayingHandicap do
 
   Returns `{:ok, %{unrounded_allowed_handicap: decimal, playing_handicap: integer}}`.
   """
-  @spec calculate(D.t(), pos_integer()) ::
+  @spec calculate(D.t(), non_neg_integer()) ::
           {:ok,
            %{
              unrounded_allowed_handicap: D.t(),

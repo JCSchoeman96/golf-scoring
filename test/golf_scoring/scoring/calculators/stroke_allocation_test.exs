@@ -149,4 +149,38 @@ defmodule GolfScoring.Scoring.Calculators.StrokeAllocationTest do
 
     assert {:error, :invalid_hole_set} = StrokeAllocation.allocate(5, duplicate_si)
   end
+
+  test "missing round_hole_id returns invalid_hole_set" do
+    holes =
+      standard_holes()
+      |> List.update_at(0, fn %{stroke_index: si, plus_stroke_order: pso} ->
+        %{stroke_index: si, plus_stroke_order: pso}
+      end)
+
+    assert {:error, :invalid_hole_set} = StrokeAllocation.allocate(5, holes)
+  end
+
+  test "nil round_hole_id returns invalid_hole_set" do
+    holes = List.replace_at(standard_holes(), 0, hole(1, round_hole_id: nil))
+
+    assert {:error, :invalid_hole_set} = StrokeAllocation.allocate(5, holes)
+  end
+
+  test "missing stroke_index returns invalid_hole_set" do
+    holes =
+      standard_holes()
+      |> List.update_at(0, fn %{round_hole_id: id, plus_stroke_order: pso} ->
+        %{round_hole_id: id, plus_stroke_order: pso}
+      end)
+
+    assert {:error, :invalid_hole_set} = StrokeAllocation.allocate(5, holes)
+  end
+
+  test "duplicate round_hole_id returns invalid_hole_set" do
+    holes =
+      standard_holes()
+      |> List.replace_at(17, hole(18, round_hole_id: "hole-1"))
+
+    assert {:error, :invalid_hole_set} = StrokeAllocation.allocate(5, holes)
+  end
 end
