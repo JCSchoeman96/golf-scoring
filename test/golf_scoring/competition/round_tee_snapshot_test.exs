@@ -895,7 +895,7 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
     hole_nine = Enum.find(holes, &(&1.hole_number == 9))
     hole_ten = Enum.find(holes, &(&1.hole_number == 10))
 
-    row_id_for = fn course_hole ->
+    row_id_for = fn snapshot_id, course_hole ->
       [[id]] =
         Repo.query!(
           """
@@ -904,7 +904,7 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
           INNER JOIN round_holes r ON r.id = h.round_hole_id
           WHERE h.round_tee_profile_snapshot_id = $1::uuid AND r.course_hole_id = $2::uuid
           """,
-          [Ecto.UUID.dump!(snapshot.id), Ecto.UUID.dump!(course_hole.id)]
+          [Ecto.UUID.dump!(snapshot_id), Ecto.UUID.dump!(course_hole.id)]
         ).rows
 
       Ecto.UUID.cast!(id)
@@ -914,7 +914,7 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
       fn ->
         Repo.query!(
           "UPDATE round_tee_hole_snapshots SET plus_stroke_order = 0 WHERE id = $1::uuid",
-          [Ecto.UUID.dump!(row_id_for.(hole_one))]
+          [Ecto.UUID.dump!(row_id_for.(snapshot.id, hole_one))]
         )
       end,
       "round_tee_hole_snapshots_plus_stroke_order_in_range"
@@ -924,7 +924,7 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
       fn ->
         Repo.query!(
           "UPDATE round_tee_hole_snapshots SET plus_stroke_order = 9 WHERE id = $1::uuid",
-          [Ecto.UUID.dump!(row_id_for.(hole_one))]
+          [Ecto.UUID.dump!(row_id_for.(snapshot.id, hole_one))]
         )
       end,
       "round_tee_hole_snapshots_plus_stroke_order_in_range"
@@ -934,7 +934,7 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
       fn ->
         Repo.query!(
           "UPDATE round_tee_hole_snapshots SET plus_stroke_order = 1 WHERE id = $1::uuid",
-          [Ecto.UUID.dump!(row_id_for.(hole_two))]
+          [Ecto.UUID.dump!(row_id_for.(snapshot.id, hole_two))]
         )
       end,
       "round_tee_hole_snapshots_unique_plus_stroke_order_per_profile"
@@ -945,8 +945,8 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
                "UPDATE round_tee_hole_snapshots SET plus_stroke_order = NULL WHERE id = ANY($1::uuid[])",
                [
                  [
-                   Ecto.UUID.dump!(row_id_for.(hole_nine)),
-                   Ecto.UUID.dump!(row_id_for.(hole_ten))
+                   Ecto.UUID.dump!(row_id_for.(snapshot.id, hole_nine)),
+                   Ecto.UUID.dump!(row_id_for.(snapshot.id, hole_ten))
                  ]
                ]
              )
@@ -954,26 +954,39 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
     other_tee = create_tee_set!(event, admin, course, "Red")
     other_profile = create_profile_with_plus_orders!(event, admin, other_tee, holes, "Women")
 
-    assert {:ok, [other_snapshot]} =
-             SnapshotRoundTeeProfiles.run(admin, round.id, [other_profile.id])
+    assert {:ok, snapshots} =
+             SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id, other_profile.id])
 
-    [[other_row_id_text]] =
-      Repo.query!(
-        """
-        SELECT h.id::text
-        FROM round_tee_hole_snapshots h
-        INNER JOIN round_holes r ON r.id = h.round_hole_id
-        WHERE h.round_tee_profile_snapshot_id = $1::uuid AND r.course_hole_id = $2::uuid
-        """,
-        [Ecto.UUID.dump!(other_snapshot.id), Ecto.UUID.dump!(hole_one.id)]
-      ).rows
+    snapshot_a =
+      Enum.find(snapshots, &(&1.source_tee_rating_profile_id == profile.id))
 
-    other_row_id = Ecto.UUID.cast!(other_row_id_text)
+    snapshot_b =
+      Enum.find(snapshots, &(&1.source_tee_rating_profile_id == other_profile.id))
+
+    assert snapshot_a.id != snapshot_b.id
+
+    plus_order_for = fn snapshot_id, course_hole ->
+      [[order]] =
+        Repo.query!(
+          """
+          SELECT h.plus_stroke_order
+          FROM round_tee_hole_snapshots h
+          INNER JOIN round_holes r ON r.id = h.round_hole_id
+          WHERE h.round_tee_profile_snapshot_id = $1::uuid AND r.course_hole_id = $2::uuid
+          """,
+          [Ecto.UUID.dump!(snapshot_id), Ecto.UUID.dump!(course_hole.id)]
+        ).rows
+
+      order
+    end
+
+    assert plus_order_for.(snapshot_a.id, hole_one) == 1
+    assert plus_order_for.(snapshot_b.id, hole_one) == 1
 
     assert {:ok, _} =
              Repo.query(
                "UPDATE round_tee_hole_snapshots SET plus_stroke_order = 1 WHERE id = $1::uuid",
-               [Ecto.UUID.dump!(other_row_id)]
+               [Ecto.UUID.dump!(row_id_for.(snapshot_b.id, hole_one))]
              )
   end
 
