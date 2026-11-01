@@ -458,6 +458,126 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
              )
   end
 
+  test "GLS-73 tee rating profile accepts absent plus stroke allocation" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    {_course, tee_set, holes} = course_with_tee_and_holes!(event, admin, hole_numbers: 1..18)
+
+    hole_ratings =
+      Enum.map(holes, fn hole ->
+        %{course_hole_id: hole.id, par: 4, stroke_index: hole.hole_number, distance_m: 350}
+      end)
+
+    assert {:ok, profile} =
+             GolfCatalog.configure_tee_rating_profile(
+               event.id,
+               profile_params_for_holes(tee_set.id, "Men", holes, hole_ratings),
+               actor: admin
+             )
+
+    assert Enum.all?(profile.hole_ratings, fn rating -> is_nil(rating.plus_stroke_order) end)
+  end
+
+  test "GLS-73 complete plus stroke allocation 1..8 persists through reload" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    {_course, tee_set, holes} = course_with_tee_and_holes!(event, admin, hole_numbers: 1..18)
+
+    hole_ratings = hole_ratings_with_plus_orders(holes)
+
+    assert {:ok, profile} =
+             GolfCatalog.configure_tee_rating_profile(
+               event.id,
+               profile_params_for_holes(tee_set.id, "Men", holes, hole_ratings),
+               actor: admin
+             )
+
+    reloaded = Repo.get!(TeeRatingProfile, profile.id)
+
+    assert plus_orders_by_hole_number(reloaded.hole_ratings, holes) ==
+             Map.new(1..8, &{&1, &1})
+  end
+
+  test "GLS-73 rejects duplicate plus stroke orders" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    {_course, tee_set, holes} = course_with_tee_and_holes!(event, admin, hole_numbers: 1..18)
+
+    hole_ratings =
+      hole_ratings_with_plus_orders(holes)
+      |> List.update_at(7, fn rating -> Map.put(rating, :plus_stroke_order, 7) end)
+
+    assert {:error, error} =
+             GolfCatalog.configure_tee_rating_profile(
+               event.id,
+               profile_params_for_holes(tee_set.id, "Men", holes, hole_ratings),
+               actor: admin
+             )
+
+    assert plus_stroke_validation_error?(error)
+  end
+
+  test "GLS-73 rejects partial plus stroke allocation" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    {_course, tee_set, holes} = course_with_tee_and_holes!(event, admin, hole_numbers: 1..18)
+
+    for hole_ratings <- [
+          partial_plus_orders(holes, 1..3),
+          partial_plus_orders(holes, 1..7)
+        ] do
+      assert {:error, error} =
+               GolfCatalog.configure_tee_rating_profile(
+                 event.id,
+                 profile_params_for_holes(tee_set.id, "Men", holes, hole_ratings),
+                 actor: admin
+               )
+
+      assert plus_stroke_validation_error?(error)
+    end
+  end
+
+  test "GLS-73 rejects gap in plus stroke allocation" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    {_course, tee_set, holes} = course_with_tee_and_holes!(event, admin, hole_numbers: 1..18)
+
+    hole_ratings =
+      hole_ratings_with_plus_orders(holes)
+      |> Enum.map(fn
+        %{plus_stroke_order: 8} = rating -> Map.put(rating, :plus_stroke_order, nil)
+        rating -> rating
+      end)
+
+    assert {:error, error} =
+             GolfCatalog.configure_tee_rating_profile(
+               event.id,
+               profile_params_for_holes(tee_set.id, "Men", holes, hole_ratings),
+               actor: admin
+             )
+
+    assert plus_stroke_validation_error?(error)
+  end
+
+  test "GLS-73 rejects out-of-range plus stroke order values" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    {_course, tee_set, holes} = course_with_tee_and_holes!(event, admin, hole_numbers: 1..18)
+
+    for invalid <- [0, 9] do
+      hole_ratings =
+        hole_ratings_with_plus_orders(holes)
+        |> List.update_at(0, fn rating -> Map.put(rating, :plus_stroke_order, invalid) end)
+
+      assert {:error, _error} =
+               GolfCatalog.configure_tee_rating_profile(
+                 event.id,
+                 profile_params_for_holes(tee_set.id, "Men", holes, hole_ratings),
+                 actor: admin
+               )
+    end
+  end
+
   test "wrong-event, revoked, suspended, disabled, stale actor, and SYSTEM_ADMIN-only fail closed" do
     event = create_event!()
     other_event = create_event!()
@@ -571,6 +691,75 @@ defmodule GolfScoring.GolfCatalog.TeeRatingProfileTest do
         %{course_hole_id: hole.id, par: 4, stroke_index: 1, distance_m: 350}
       ]
     }
+  end
+
+  defp profile_params_for_holes(tee_set_id, label, holes, hole_ratings) do
+    %{
+      tee_set_id: tee_set_id,
+      rating_label: label,
+      course_rating: D.new("72.0"),
+      slope_rating: 113,
+      total_par: length(holes) * 4,
+      hole_ratings: hole_ratings
+    }
+  end
+
+  defp hole_ratings_with_plus_orders(holes) do
+    Enum.map(holes, fn hole ->
+      base = %{
+        course_hole_id: hole.id,
+        par: 4,
+        stroke_index: hole.hole_number,
+        distance_m: 350
+      }
+
+      if hole.hole_number <= 8 do
+        Map.put(base, :plus_stroke_order, hole.hole_number)
+      else
+        base
+      end
+    end)
+  end
+
+  defp partial_plus_orders(holes, order_range) do
+    orders = MapSet.new(order_range)
+
+    Enum.map(holes, fn hole ->
+      base = %{
+        course_hole_id: hole.id,
+        par: 4,
+        stroke_index: hole.hole_number,
+        distance_m: 350
+      }
+
+      if MapSet.member?(orders, hole.hole_number) do
+        Map.put(base, :plus_stroke_order, hole.hole_number)
+      else
+        base
+      end
+    end)
+  end
+
+  defp plus_orders_by_hole_number(hole_ratings, holes) do
+    hole_number_by_id = Map.new(holes, &{&1.id, &1.hole_number})
+
+    hole_ratings
+    |> Enum.filter(fn rating -> not is_nil(rating.plus_stroke_order) end)
+    |> Map.new(fn rating ->
+      {Map.fetch!(hole_number_by_id, rating.course_hole_id), rating.plus_stroke_order}
+    end)
+  end
+
+  defp plus_stroke_validation_error?(error) do
+    errors = Ash.Error.to_error_class(error).errors
+
+    Enum.any?(errors, fn
+      %{field: :hole_ratings, message: message} when is_binary(message) ->
+        String.contains?(message, "Plus Strokes")
+
+      _ ->
+        false
+    end)
   end
 
   defp course_with_tee_and_holes!(event, admin, opts) do

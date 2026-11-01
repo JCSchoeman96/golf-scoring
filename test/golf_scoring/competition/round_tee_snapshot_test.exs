@@ -187,7 +187,127 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
 
     assert refreshed.id == snapshot.id
     assert refreshed.slope_rating == 99
-    assert Enum.all?(hole_snapshot_values(refreshed.id), fn {_id, par, _, _} -> par == 3 end)
+    assert Enum.all?(hole_snapshot_values(refreshed.id), fn {_id, par, _, _, _} -> par == 3 end)
+  end
+
+  test "GLS-73 snapshot copies exact plus stroke allocation from catalog" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    tee_set = create_tee_set!(event, admin, course, "White")
+    profile = create_profile_with_plus_orders!(event, admin, tee_set, holes, "Men")
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
+
+    assert {:ok, [snapshot]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+
+    layout_holes =
+      Repo.query!(
+        "SELECT id::text, course_hole_id::text FROM round_holes WHERE round_id = $1::uuid ORDER BY play_order",
+        [Ecto.UUID.dump!(round.id)]
+      ).rows
+
+    round_hole_id_by_course_hole =
+      Map.new(layout_holes, fn [round_hole_id, course_hole_id] ->
+        {Ecto.UUID.cast!(course_hole_id), Ecto.UUID.cast!(round_hole_id)}
+      end)
+
+    plus_by_round_hole = plus_stroke_orders_in_snapshot(snapshot.id)
+
+    for hole_number <- 1..8 do
+      course_hole = Enum.find(holes, &(&1.hole_number == hole_number))
+      round_hole_id = Map.fetch!(round_hole_id_by_course_hole, course_hole.id)
+      assert plus_by_round_hole[round_hole_id] == hole_number
+    end
+
+    for hole_number <- 9..18 do
+      course_hole = Enum.find(holes, &(&1.hole_number == hole_number))
+      round_hole_id = Map.fetch!(round_hole_id_by_course_hole, course_hole.id)
+      refute Map.has_key?(plus_by_round_hole, round_hole_id)
+    end
+  end
+
+  test "GLS-73 catalog plus stroke edits do not mutate snapshot until re-snapshot" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    tee_set = create_tee_set!(event, admin, course, "White")
+    profile = create_profile_with_plus_orders!(event, admin, tee_set, holes, "Men")
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
+
+    assert {:ok, [snapshot]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+    before_plus = plus_stroke_orders_in_snapshot(snapshot.id)
+
+    corrected_holes =
+      Enum.map(holes, fn hole ->
+        base = %{
+          course_hole_id: hole.id,
+          par: 4,
+          stroke_index: hole.hole_number,
+          distance_m: 300 + hole.hole_number
+        }
+
+        plus_order =
+          case hole.hole_number do
+            n when n in 9..16 -> n - 8
+            _ -> nil
+          end
+
+        if plus_order, do: Map.put(base, :plus_stroke_order, plus_order), else: base
+      end)
+
+    assert {:ok, _updated} =
+             GolfCatalog.configure_tee_rating_profile(
+               event.id,
+               %{
+                 tee_set_id: tee_set.id,
+                 rating_label: "Men",
+                 course_rating: D.new("72.0"),
+                 slope_rating: 113,
+                 total_par: 72,
+                 hole_ratings: corrected_holes
+               },
+               actor: admin
+             )
+
+    assert plus_stroke_orders_in_snapshot(snapshot.id) == before_plus
+
+    assert {:ok, [refreshed]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+    assert refreshed.id == snapshot.id
+    after_plus = plus_stroke_orders_in_snapshot(refreshed.id)
+    refute after_plus == before_plus
+
+    for hole_number <- 1..8 do
+      course_hole = Enum.find(holes, &(&1.hole_number == hole_number + 8))
+      round_hole_id = round_hole_id_for_course_hole!(round.id, course_hole.id)
+      assert after_plus[round_hole_id] == hole_number
+    end
+  end
+
+  test "GLS-73 frozen round state preserves plus stroke snapshot on rejected re-snapshot" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    tee_set = create_tee_set!(event, admin, course, "White")
+    profile = create_profile_with_plus_orders!(event, admin, tee_set, holes, "Men")
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
+    assert {:ok, [snapshot]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+    before_plus = plus_stroke_orders_in_snapshot(snapshot.id)
+
+    set_round_state!(round, :scoring_open)
+
+    assert {:error, {:invalid_round_state, "scoring_open"}} =
+             SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+
+    assert plus_stroke_orders_in_snapshot(snapshot.id) == before_plus
   end
 
   test "desired-set reconciliation removes deselected profiles while preserving retained ids" do
@@ -758,6 +878,105 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
     )
   end
 
+  test "GLS-73 PostgreSQL enforces plus_stroke_order range and uniqueness" do
+    event = create_event!()
+    admin = create_event_admin!(event)
+    course = create_course!(event, admin)
+    holes = create_eighteen_holes!(event, admin, course)
+    tee_set = create_tee_set!(event, admin, course, "White")
+    profile = create_profile_with_plus_orders!(event, admin, tee_set, holes, "Men")
+
+    {:ok, round} = Competition.create_round(event.id, course.id, actor: admin)
+    {:ok, _} = ConfigureRoundLayout.run(admin, round.id, Enum.map(holes, & &1.id))
+    assert {:ok, [snapshot]} = SnapshotRoundTeeProfiles.run(admin, round.id, [profile.id])
+
+    hole_one = Enum.find(holes, &(&1.hole_number == 1))
+    hole_two = Enum.find(holes, &(&1.hole_number == 2))
+    hole_nine = Enum.find(holes, &(&1.hole_number == 9))
+    hole_ten = Enum.find(holes, &(&1.hole_number == 10))
+
+    row_id_for = fn course_hole ->
+      [[id]] =
+        Repo.query!(
+          """
+          SELECT h.id::text
+          FROM round_tee_hole_snapshots h
+          INNER JOIN round_holes r ON r.id = h.round_hole_id
+          WHERE h.round_tee_profile_snapshot_id = $1::uuid AND r.course_hole_id = $2::uuid
+          """,
+          [Ecto.UUID.dump!(snapshot.id), Ecto.UUID.dump!(course_hole.id)]
+        ).rows
+
+      Ecto.UUID.cast!(id)
+    end
+
+    assert_constraint_violation(
+      fn ->
+        Repo.query!(
+          "UPDATE round_tee_hole_snapshots SET plus_stroke_order = 0 WHERE id = $1::uuid",
+          [Ecto.UUID.dump!(row_id_for.(hole_one))]
+        )
+      end,
+      "round_tee_hole_snapshots_plus_stroke_order_in_range"
+    )
+
+    assert_constraint_violation(
+      fn ->
+        Repo.query!(
+          "UPDATE round_tee_hole_snapshots SET plus_stroke_order = 9 WHERE id = $1::uuid",
+          [Ecto.UUID.dump!(row_id_for.(hole_one))]
+        )
+      end,
+      "round_tee_hole_snapshots_plus_stroke_order_in_range"
+    )
+
+    assert_constraint_violation(
+      fn ->
+        Repo.query!(
+          "UPDATE round_tee_hole_snapshots SET plus_stroke_order = 1 WHERE id = $1::uuid",
+          [Ecto.UUID.dump!(row_id_for.(hole_two))]
+        )
+      end,
+      "round_tee_hole_snapshots_unique_plus_stroke_order_per_profile"
+    )
+
+    assert {:ok, _} =
+             Repo.query(
+               "UPDATE round_tee_hole_snapshots SET plus_stroke_order = NULL WHERE id = ANY($1::uuid[])",
+               [
+                 [
+                   Ecto.UUID.dump!(row_id_for.(hole_nine)),
+                   Ecto.UUID.dump!(row_id_for.(hole_ten))
+                 ]
+               ]
+             )
+
+    other_tee = create_tee_set!(event, admin, course, "Red")
+    other_profile = create_profile_with_plus_orders!(event, admin, other_tee, holes, "Women")
+
+    assert {:ok, [other_snapshot]} =
+             SnapshotRoundTeeProfiles.run(admin, round.id, [other_profile.id])
+
+    [[other_row_id_text]] =
+      Repo.query!(
+        """
+        SELECT h.id::text
+        FROM round_tee_hole_snapshots h
+        INNER JOIN round_holes r ON r.id = h.round_hole_id
+        WHERE h.round_tee_profile_snapshot_id = $1::uuid AND r.course_hole_id = $2::uuid
+        """,
+        [Ecto.UUID.dump!(other_snapshot.id), Ecto.UUID.dump!(hole_one.id)]
+      ).rows
+
+    other_row_id = Ecto.UUID.cast!(other_row_id_text)
+
+    assert {:ok, _} =
+             Repo.query(
+               "UPDATE round_tee_hole_snapshots SET plus_stroke_order = 1 WHERE id = $1::uuid",
+               [Ecto.UUID.dump!(other_row_id)]
+             )
+  end
+
   defp create_event! do
     Event
     |> Ash.Changeset.for_create(:create_internal, %{})
@@ -849,6 +1068,65 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
     profile
   end
 
+  defp create_profile_with_plus_orders!(event, admin, tee_set, holes, label) do
+    hole_ratings =
+      Enum.map(holes, fn hole ->
+        base = %{
+          course_hole_id: hole.id,
+          par: 4,
+          stroke_index: hole.hole_number,
+          distance_m: 300 + hole.hole_number
+        }
+
+        if hole.hole_number <= 8 do
+          Map.put(base, :plus_stroke_order, hole.hole_number)
+        else
+          base
+        end
+      end)
+
+    {:ok, profile} =
+      GolfCatalog.configure_tee_rating_profile(
+        event.id,
+        %{
+          tee_set_id: tee_set.id,
+          rating_label: label,
+          course_rating: D.new("72.0"),
+          slope_rating: 113,
+          total_par: 72,
+          hole_ratings: hole_ratings
+        },
+        actor: admin
+      )
+
+    profile
+  end
+
+  defp plus_stroke_orders_in_snapshot(snapshot_id) do
+    Repo.query!(
+      """
+      SELECT round_hole_id::text, plus_stroke_order
+      FROM round_tee_hole_snapshots
+      WHERE round_tee_profile_snapshot_id = $1::uuid AND plus_stroke_order IS NOT NULL
+      ORDER BY round_hole_id
+      """,
+      [Ecto.UUID.dump!(snapshot_id)]
+    ).rows
+    |> Map.new(fn [round_hole_id, order] ->
+      {Ecto.UUID.cast!(round_hole_id), order}
+    end)
+  end
+
+  defp round_hole_id_for_course_hole!(round_id, course_hole_id) do
+    [[round_hole_id]] =
+      Repo.query!(
+        "SELECT id::text FROM round_holes WHERE round_id = $1::uuid AND course_hole_id = $2::uuid",
+        [Ecto.UUID.dump!(round_id), Ecto.UUID.dump!(course_hole_id)]
+      ).rows
+
+    Ecto.UUID.cast!(round_hole_id)
+  end
+
   defp assign_role!(actor, event, staff, role) do
     {:ok, _} =
       Accounts.assign_event_staff_role(
@@ -892,15 +1170,15 @@ defmodule GolfScoring.Competition.RoundTeeSnapshotTest do
   defp hole_snapshot_values(snapshot_id) do
     Repo.query!(
       """
-      SELECT round_hole_id::text, par, stroke_index, distance_m
+      SELECT round_hole_id::text, par, stroke_index, distance_m, plus_stroke_order
       FROM round_tee_hole_snapshots
       WHERE round_tee_profile_snapshot_id = $1::uuid
       ORDER BY round_hole_id
       """,
       [Ecto.UUID.dump!(snapshot_id)]
     ).rows
-    |> Enum.map(fn [round_hole_id, par, stroke_index, distance_m] ->
-      {Ecto.UUID.cast!(round_hole_id), par, stroke_index, distance_m}
+    |> Enum.map(fn [round_hole_id, par, stroke_index, distance_m, plus_stroke_order] ->
+      {Ecto.UUID.cast!(round_hole_id), par, stroke_index, distance_m, plus_stroke_order}
     end)
   end
 

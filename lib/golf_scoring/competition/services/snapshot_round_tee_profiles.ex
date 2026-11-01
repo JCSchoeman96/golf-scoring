@@ -234,7 +234,8 @@ defmodule GolfScoring.Competition.Services.SnapshotRoundTeeProfiles do
           course_hole_id: cast_uuid!(rating["course_hole_id"] || rating[:course_hole_id]),
           par: rating["par"] || rating[:par],
           stroke_index: rating["stroke_index"] || rating[:stroke_index],
-          distance_m: rating["distance_m"] || rating[:distance_m]
+          distance_m: rating["distance_m"] || rating[:distance_m],
+          plus_stroke_order: rating["plus_stroke_order"] || rating[:plus_stroke_order]
         }
       end)
 
@@ -354,7 +355,8 @@ defmodule GolfScoring.Competition.Services.SnapshotRoundTeeProfiles do
         round_hole_id: hole.id,
         par: rating.par,
         stroke_index: rating.stroke_index,
-        distance_m: rating.distance_m
+        distance_m: rating.distance_m,
+        plus_stroke_order: rating.plus_stroke_order
       })
       |> Ash.create!(authorize?: false)
     end)
@@ -396,7 +398,8 @@ defmodule GolfScoring.Competition.Services.SnapshotRoundTeeProfiles do
       |> Ash.Changeset.for_update(:refresh_hole_snapshot_values, %{
         par: rating.par,
         stroke_index: rating.stroke_index,
-        distance_m: rating.distance_m
+        distance_m: rating.distance_m,
+        plus_stroke_order: rating.plus_stroke_order
       })
       |> Ash.update!(authorize?: false)
     end)
