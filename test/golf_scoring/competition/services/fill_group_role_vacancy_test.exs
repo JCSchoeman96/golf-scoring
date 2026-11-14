@@ -194,6 +194,62 @@ defmodule GolfScoring.Competition.Services.FillGroupRoleVacancyTest do
     refute_receive {:playing_group_attention_cleared, _}, 50
   end
 
+  test "rejects a plain map that impersonates an active staff actor" do
+    fixture = vacancy_fixture!(:primary_scorer)
+    subscribe(fixture.round.id)
+    before_assignments = assignment_count(fixture.group.id)
+    forged_actor = %{id: fixture.admin.id, status: :active}
+
+    assert {:error, :forbidden} =
+             fill(fixture, forged_actor, Enum.at(fixture.entries, 2).id, :primary_scorer)
+
+    assert assignment_count(fixture.group.id) == before_assignments
+    assert count_fill_audits(fixture.group.id) == 0
+    assert group_state(fixture.group.id) == "attention_required"
+    refute_receive {:group_role_vacancy_filled, _}, 50
+    refute_receive {:playing_group_attention_cleared, _}, 50
+  end
+
+  test "rejects invocation in a caller transaction before issuing SQL" do
+    fixture = vacancy_fixture!(:primary_scorer)
+    subscribe(fixture.round.id)
+    assignments_before = assignment_count(fixture.group.id)
+    handler = {__MODULE__, make_ref()}
+
+    assert {:ok, :rejected} =
+             Repo.transaction(fn ->
+               :ok =
+                 :telemetry.attach(
+                   handler,
+                   [:golf_scoring, :repo, :query],
+                   &__MODULE__.observe_query/4,
+                   self()
+                 )
+
+               try do
+                 assert {:error, :transaction_already_open} =
+                          fill(
+                            fixture,
+                            fixture.admin,
+                            Enum.at(fixture.entries, 2).id,
+                            :primary_scorer
+                          )
+
+                 refute_receive {:fill_group_role_vacancy_query, _metadata}, 0
+               after
+                 :telemetry.detach(handler)
+               end
+
+               :rejected
+             end)
+
+    assert assignment_count(fixture.group.id) == assignments_before
+    assert count_fill_audits(fixture.group.id) == 0
+    assert group_state(fixture.group.id) == "attention_required"
+    refute_receive {:group_role_vacancy_filled, _}, 50
+    refute_receive {:playing_group_attention_cleared, _}, 50
+  end
+
   test "rejects an ineligible replacement participant" do
     fixture = vacancy_fixture!(:primary_scorer)
     subscribe(fixture.round.id)
@@ -462,49 +518,91 @@ defmodule GolfScoring.Competition.Services.FillGroupRoleVacancyTest do
     assert group_state(fixture.group.id) == "playing"
   end
 
-  test "simultaneous fills on independent sessions create one current role revision" do
+  test "competing fills serialize into exactly one new role revision" do
     fixture = committed_vacancy_fixture!(:primary_scorer)
-    replacements = [Enum.at(fixture.entries, 2), Enum.at(fixture.entries, 3)]
+
+    [first_replacement, second_replacement] = [
+      Enum.at(fixture.entries, 2),
+      Enum.at(fixture.entries, 3)
+    ]
+
     subscribe(fixture.round.id)
 
-    results =
-      replacements
-      |> Task.async_stream(
-        fn replacement ->
-          Sandbox.unboxed_run(Repo, fn ->
-            [[pid]] = Repo.query!("SELECT pg_backend_pid()").rows
-
-            {pid,
-             fill(
-               fixture,
-               fixture.admin,
-               replacement.id,
-               :primary_scorer
-             )}
-          end)
-        end,
-        max_concurrency: 2,
-        timeout: 20_000
+    {first_pid, first_result, second_pid, second_result} =
+      race_with_round_lock_barrier!(
+        fixture,
+        fn -> fill(fixture, fixture.admin, first_replacement.id, :primary_scorer) end,
+        fn -> fill(fixture, fixture.admin, second_replacement.id, :primary_scorer) end
       )
-      |> Enum.map(fn {:ok, result} -> result end)
 
-    assert [first, second] = results
-    assert elem(first, 0) != elem(second, 0)
-    assert Enum.count(results, fn {_pid, result} -> match?({:ok, _}, result) end) == 1
-
-    assert Enum.count(results, fn {_pid, result} -> match?({:error, _}, result) end) == 1
+    assert first_pid != second_pid
+    assert {:ok, filled} = first_result
+    assert {:error, {:invalid_playing_group_state, "playing"}} = second_result
+    assert filled.assignment.round_entry_id == first_replacement.id
+    assert filled.assignment.assignment_version == 2
+    assert count_fill_audits(fixture.group.id) == 1
+    assert active_role_holder(fixture.group.id, :primary_scorer) == first_replacement.id
+    assert group_scoring_revision(fixture.group.id) == 1
+    assert_receive {:group_role_vacancy_filled, %{playing_group_id: group_id}}
+    assert group_id == fixture.group.id
+    assert_receive {:playing_group_attention_cleared, %{playing_group_id: ^group_id}}
+    refute_receive {:group_role_vacancy_filled, _}, 50
 
     assert Repo.query!(
-             "SELECT max(assignment_version) FROM group_role_assignments WHERE playing_group_id = $1::uuid AND role = 'primary_scorer'",
-             [
-               Ecto.UUID.dump!(fixture.group.id)
-             ]
-           ).rows == [[2]]
+             "SELECT assignment_version, state FROM group_role_assignments WHERE playing_group_id = $1::uuid AND role = 'primary_scorer' ORDER BY assignment_version",
+             [Ecto.UUID.dump!(fixture.group.id)]
+           ).rows == [[1, "revoked"], [2, "active"]]
 
     assert length(active_assignments(fixture.group.id)) == 2
   end
 
-  test "vacancy fill and hole submission serialize on the Round row" do
+  test "submission that queues first rejects the vacancy before fill commits" do
+    fixture = committed_vacancy_fixture!(:primary_scorer)
+    replacement = Enum.at(fixture.entries, 2)
+    subscribe(fixture.round.id)
+
+    assert {:ok, %{grant: grant}} =
+             Sandbox.unboxed_run(Repo, fn ->
+               Accounts.issue_player_access(
+                 fixture.admin,
+                 fixture.event.id,
+                 replacement.player_id
+               )
+             end)
+
+    submissions_before = hole_submission_count(fixture.round.id)
+    submit_audits_before = submission_audit_count(fixture.round.id)
+    command = next_submission_command(fixture, replacement.id, 1)
+
+    {submit_pid, submit_result, fill_pid, fill_result} =
+      race_with_round_lock_barrier!(
+        fixture,
+        fn -> SubmitGroupHole.run(grant, fixture.event.id, fixture.round.id, command) end,
+        fn -> fill(fixture, fixture.admin, replacement.id, :primary_scorer) end
+      )
+
+    assert submit_pid != fill_pid
+    assert {:error, :no_active_primary_scorer} = submit_result
+    assert {:ok, filled} = fill_result
+    assert filled.assignment.assignment_version == 2
+    assert group_state(fixture.group.id) == "playing"
+    assert active_role_holder(fixture.group.id, :primary_scorer) == replacement.id
+    assert group_scoring_revision(fixture.group.id) == 1
+    assert hole_submission_count(fixture.round.id) == submissions_before
+    assert submission_audit_count(fixture.round.id) == submit_audits_before
+    assert count_fill_audits(fixture.group.id) == 1
+    assert fill_audit_context!(fixture.group.id)["replacement"]["assignment_version"] == 2
+
+    assert_receive {:group_role_vacancy_filled, %{round_id: round_id, playing_group_id: group_id}}
+
+    assert round_id == fixture.round.id
+    assert group_id == fixture.group.id
+    assert_receive {:playing_group_attention_cleared, %{playing_group_id: ^group_id}}
+    refute_receive {:group_hole_submitted, _}, 50
+    refute_receive {:playing_group_attention_required, _}, 50
+  end
+
+  test "fill that queues first commits a revision used by the following submission" do
     fixture = committed_vacancy_fixture!(:primary_scorer)
     replacement = Enum.at(fixture.entries, 2)
 
@@ -517,47 +615,117 @@ defmodule GolfScoring.Competition.Services.FillGroupRoleVacancyTest do
                )
              end)
 
+    submissions_before = hole_submission_count(fixture.round.id)
+    submit_audits_before = submission_audit_count(fixture.round.id)
     command = next_submission_command(fixture, replacement.id, 2)
+    subscribe(fixture.round.id)
 
-    results =
-      [:fill, :submit]
-      |> Task.async_stream(
-        fn operation ->
-          Sandbox.unboxed_run(Repo, fn ->
-            [[pid]] = Repo.query!("SELECT pg_backend_pid()").rows
-
-            result =
-              case operation do
-                :fill ->
-                  fill(fixture, fixture.admin, replacement.id, :primary_scorer)
-
-                :submit ->
-                  SubmitGroupHole.run(grant, fixture.event.id, fixture.round.id, command)
-              end
-
-            {operation, pid, result}
-          end)
-        end,
-        max_concurrency: 2,
-        timeout: 20_000
+    {fill_pid, fill_result, submit_pid, submit_result} =
+      race_with_round_lock_barrier!(
+        fixture,
+        fn -> fill(fixture, fixture.admin, replacement.id, :primary_scorer) end,
+        fn -> SubmitGroupHole.run(grant, fixture.event.id, fixture.round.id, command) end
       )
-      |> Enum.map(fn {:ok, result} -> result end)
-      |> Map.new(fn {operation, pid, result} -> {operation, {pid, result}} end)
 
-    {fill_pid, {:ok, filled}} = results.fill
-    {submit_pid, submit_result} = results.submit
     assert fill_pid != submit_pid
+    assert {:ok, filled} = fill_result
     assert filled.assignment.assignment_version == 2
+
+    assert {:ok, receipt} = submit_result
+    assert receipt.role_assignment_version == 2
     assert group_state(fixture.group.id) == "playing"
     assert active_role_holder(fixture.group.id, :primary_scorer) == replacement.id
+    assert group_scoring_revision(fixture.group.id) == 2
+    assert hole_submission_count(fixture.round.id) == submissions_before + 1
+    assert submission_audit_count(fixture.round.id) == submit_audits_before + 1
+    assert count_fill_audits(fixture.group.id) == 1
+    assert fill_audit_context!(fixture.group.id)["replacement"]["assignment_version"] == 2
 
-    case submit_result do
-      {:ok, receipt} ->
-        assert receipt.role_assignment_version == 2
-        assert group_scoring_revision(fixture.group.id) == 2
+    assert_receive {:group_role_vacancy_filled, %{round_id: round_id, playing_group_id: group_id}}
 
-      {:error, :no_active_primary_scorer} ->
-        assert group_scoring_revision(fixture.group.id) == 1
+    assert round_id == fixture.round.id
+    assert group_id == fixture.group.id
+    assert_receive {:playing_group_attention_cleared, %{playing_group_id: ^group_id}}
+    assert_receive {:group_hole_submitted, %{round_id: ^round_id, playing_group_id: ^group_id}}
+    refute_receive {:playing_group_attention_required, _}, 50
+  end
+
+  defp race_with_round_lock_barrier!(fixture, first_operation, second_operation) do
+    parent = self()
+    token = make_ref()
+
+    lock_holder = Task.async(fn -> hold_round_lock!(fixture.round.id, parent, token) end)
+
+    first =
+      Task.async(fn ->
+        receive do
+          {:t3_run_round_operation, ^token} ->
+            Sandbox.unboxed_run(Repo, fn ->
+              backend_pid = pg_backend_pid!()
+              send(parent, {:t3_round_operation_started, token, :first, backend_pid})
+              first_operation.()
+            end)
+        end
+      end)
+
+    second =
+      Task.async(fn ->
+        receive do
+          {:t3_run_round_operation, ^token} ->
+            Sandbox.unboxed_run(Repo, fn ->
+              backend_pid = pg_backend_pid!()
+              send(parent, {:t3_round_operation_started, token, :second, backend_pid})
+              second_operation.()
+            end)
+        end
+      end)
+
+    try do
+      assert_receive {:t3_round_lock_held, ^token, holder_pid}, 5_000
+      send(first.pid, {:t3_run_round_operation, token})
+
+      assert_receive {:t3_round_operation_started, ^token, :first, first_pid}, 10_000
+      await_blocked_by!(first_pid, holder_pid, System.monotonic_time(:millisecond) + 10_000)
+
+      send(second.pid, {:t3_run_round_operation, token})
+      assert_receive {:t3_round_operation_started, ^token, :second, second_pid}, 10_000
+      await_blocked_by!(second_pid, first_pid, System.monotonic_time(:millisecond) + 10_000)
+
+      send(lock_holder.pid, {:t3_release_round_lock, token})
+      assert {:ok, :released} = Task.await(lock_holder, 10_000)
+
+      first_result = Task.await(first, 25_000)
+      second_result = Task.await(second, 25_000)
+      {first_pid, first_result, second_pid, second_result}
+    after
+      send(lock_holder.pid, {:t3_release_round_lock, token})
+      Task.shutdown(first, :brutal_kill)
+      Task.shutdown(second, :brutal_kill)
+      Task.shutdown(lock_holder, :brutal_kill)
+    end
+  end
+
+  defp hold_round_lock!(round_id, parent, token) do
+    Sandbox.unboxed_run(Repo, fn ->
+      Repo.transaction(fn ->
+        backend_pid = pg_backend_pid!()
+
+        Repo.query!(
+          "SELECT id FROM rounds WHERE id = $1::uuid FOR UPDATE",
+          [Ecto.UUID.dump!(round_id)]
+        )
+
+        send(parent, {:t3_round_lock_held, token, backend_pid})
+        wait_for_round_lock_release!(token)
+      end)
+    end)
+  end
+
+  defp wait_for_round_lock_release!(token) do
+    receive do
+      {:t3_release_round_lock, ^token} -> :released
+    after
+      20_000 -> raise "timed out holding the T3 Round lock barrier"
     end
   end
 
@@ -706,97 +874,143 @@ defmodule GolfScoring.Competition.Services.FillGroupRoleVacancyTest do
 
   defp cleanup_committed_fixture!(fixture) do
     Sandbox.unboxed_run(Repo, fn ->
-      Repo.query!(
-        "DROP TRIGGER round_entry_participation_rulings_reject_mutation ON round_entry_participation_rulings"
-      )
+      assert {:ok, :cleaned} =
+               Repo.transaction(fn ->
+                 Repo.query!(
+                   "DROP TRIGGER round_entry_participation_rulings_reject_mutation ON public.round_entry_participation_rulings"
+                 )
 
-      Repo.query!(
-        "ALTER TABLE public.score_revisions DISABLE TRIGGER score_revisions_immutable_rows"
-      )
+                 Repo.query!(
+                   "ALTER TABLE public.score_revisions DISABLE TRIGGER score_revisions_immutable_rows"
+                 )
 
-      try do
-        player_ids =
-          Repo.query!("SELECT player_id::text FROM round_entries WHERE round_id = $1::uuid", [
-            Ecto.UUID.dump!(fixture.round.id)
-          ]).rows
-          |> Enum.map(fn [id] -> Ecto.UUID.cast!(id) end)
+                 try do
+                   player_ids =
+                     Repo.query!(
+                       "SELECT player_id::text FROM round_entries WHERE round_id = $1::uuid",
+                       [
+                         Ecto.UUID.dump!(fixture.round.id)
+                       ]
+                     ).rows
+                     |> Enum.map(fn [id] -> Ecto.UUID.cast!(id) end)
 
-        statements = [
-          {"DELETE FROM audit_events WHERE context->>'round_id' = $1", [fixture.round.id]},
-          {"DELETE FROM round_entry_participation_rulings WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM score_verifications WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM score_revisions WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM score_queries WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM hole_results WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM hole_submissions WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM scorecards WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM competition_handicaps WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM handicap_snapshots WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM competition_side_results WHERE competition_side_id IN (SELECT id FROM competition_sides WHERE round_id = $1::uuid)",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM competition_side_memberships WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM competition_sides WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM group_role_assignments WHERE playing_group_id IN (SELECT id FROM playing_groups WHERE round_id = $1::uuid)",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM round_entries WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM playing_groups WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM round_competitions WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM round_tee_hole_snapshots WHERE round_tee_profile_snapshot_id IN (SELECT id FROM round_tee_profile_snapshots WHERE round_id = $1::uuid)",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM round_tee_profile_snapshots WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM round_holes WHERE round_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM rounds WHERE id = $1::uuid", [Ecto.UUID.dump!(fixture.round.id)]},
-          {"DELETE FROM tee_rating_profiles WHERE id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.tee_profile.id)]},
-          {"DELETE FROM tee_sets WHERE id = $1::uuid", [Ecto.UUID.dump!(fixture.tee_set.id)]},
-          {"DELETE FROM course_holes WHERE course_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.course.id)]},
-          {"DELETE FROM courses WHERE id = $1::uuid", [Ecto.UUID.dump!(fixture.course.id)]},
-          {"DELETE FROM event_staff_assignments WHERE event_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.event.id)]},
-          {"DELETE FROM player_access_grants WHERE event_id = $1::uuid",
-           [Ecto.UUID.dump!(fixture.event.id)]},
-          {"DELETE FROM events WHERE id = $1::uuid", [Ecto.UUID.dump!(fixture.event.id)]},
-          {"DELETE FROM staff_users WHERE id = $1::uuid", [Ecto.UUID.dump!(fixture.admin.id)]}
-        ]
+                   statements = [
+                     {"DELETE FROM audit_events WHERE context->>'round_id' = $1",
+                      [fixture.round.id]},
+                     {"DELETE FROM round_entry_participation_rulings WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM score_verifications WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM score_revisions WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM score_queries WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM hole_results WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM hole_submissions WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM scorecards WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM competition_handicaps WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM handicap_snapshots WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM competition_side_results WHERE competition_side_id IN (SELECT id FROM competition_sides WHERE round_id = $1::uuid)",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM competition_side_memberships WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM competition_sides WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM group_role_assignments WHERE playing_group_id IN (SELECT id FROM playing_groups WHERE round_id = $1::uuid)",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM round_entries WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM playing_groups WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM round_competitions WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM round_tee_hole_snapshots WHERE round_tee_profile_snapshot_id IN (SELECT id FROM round_tee_profile_snapshots WHERE round_id = $1::uuid)",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM round_tee_profile_snapshots WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM round_holes WHERE round_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM rounds WHERE id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.round.id)]},
+                     {"DELETE FROM tee_rating_profiles WHERE id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.tee_profile.id)]},
+                     {"DELETE FROM tee_sets WHERE id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.tee_set.id)]},
+                     {"DELETE FROM course_holes WHERE course_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.course.id)]},
+                     {"DELETE FROM courses WHERE id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.course.id)]},
+                     {"DELETE FROM event_staff_assignments WHERE event_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.event.id)]},
+                     {"DELETE FROM player_access_grants WHERE event_id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.event.id)]},
+                     {"DELETE FROM events WHERE id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.event.id)]},
+                     {"DELETE FROM staff_users WHERE id = $1::uuid",
+                      [Ecto.UUID.dump!(fixture.admin.id)]}
+                   ]
 
-        Enum.each(statements, fn {sql, args} -> Repo.query!(sql, args) end)
+                   Enum.each(statements, fn {sql, args} -> Repo.query!(sql, args) end)
 
-        Enum.each(
-          player_ids,
-          &Repo.query!("DELETE FROM players WHERE id = $1::uuid", [Ecto.UUID.dump!(&1)])
-        )
-      after
-        Repo.query!(
-          "ALTER TABLE public.score_revisions ENABLE ALWAYS TRIGGER score_revisions_immutable_rows"
-        )
+                   Enum.each(
+                     player_ids,
+                     &Repo.query!("DELETE FROM players WHERE id = $1::uuid", [Ecto.UUID.dump!(&1)])
+                   )
+                 after
+                   Repo.query!(
+                     "ALTER TABLE public.score_revisions ENABLE ALWAYS TRIGGER score_revisions_immutable_rows"
+                   )
 
-        Repo.query!("""
-        CREATE TRIGGER round_entry_participation_rulings_reject_mutation
-        BEFORE UPDATE OR DELETE ON round_entry_participation_rulings
-        FOR EACH ROW EXECUTE FUNCTION public.reject_round_entry_participation_ruling_mutation()
-        """)
+                   Repo.query!(
+                     "ALTER TABLE public.score_revisions ENABLE ALWAYS TRIGGER score_revisions_immutable_truncate"
+                   )
 
-        Repo.query!(
-          "ALTER TABLE public.round_entry_participation_rulings ENABLE ALWAYS TRIGGER round_entry_participation_rulings_reject_mutation"
-        )
-      end
+                   Repo.query!("""
+                   CREATE TRIGGER round_entry_participation_rulings_reject_mutation
+                   BEFORE UPDATE OR DELETE ON public.round_entry_participation_rulings
+                   FOR EACH ROW EXECUTE FUNCTION public.reject_round_entry_participation_ruling_mutation()
+                   """)
+
+                   Repo.query!(
+                     "ALTER TABLE public.round_entry_participation_rulings ENABLE ALWAYS TRIGGER round_entry_participation_rulings_reject_mutation"
+                   )
+
+                   Repo.query!(
+                     "ALTER TABLE public.round_entry_participation_rulings ENABLE ALWAYS TRIGGER round_entry_participation_rulings_reject_truncate"
+                   )
+                 end
+
+                 assert [["A"], ["A"]] ==
+                          Repo.query!("""
+                          SELECT tgenabled::text
+                          FROM pg_trigger
+                          WHERE tgrelid = 'public.round_entry_participation_rulings'::regclass
+                            AND tgname IN (
+                              'round_entry_participation_rulings_reject_mutation',
+                              'round_entry_participation_rulings_reject_truncate'
+                            )
+                          ORDER BY tgname
+                          """).rows
+
+                 assert [["A"], ["A"]] ==
+                          Repo.query!("""
+                          SELECT tgenabled::text
+                          FROM pg_trigger
+                          WHERE tgrelid = 'public.score_revisions'::regclass
+                            AND tgname IN (
+                              'score_revisions_immutable_rows',
+                              'score_revisions_immutable_truncate'
+                            )
+                          ORDER BY tgname
+                          """).rows
+
+                 :cleaned
+               end)
     end)
   end
 
@@ -955,27 +1169,48 @@ defmodule GolfScoring.Competition.Services.FillGroupRoleVacancyTest do
   end
 
   defp delete_current_hole_results!(round_id) do
-    Repo.query!("DELETE FROM score_verifications WHERE round_id = $1::uuid", [
-      Ecto.UUID.dump!(round_id)
-    ])
+    assert {:ok, :deleted} =
+             Repo.transaction(fn ->
+               Repo.query!("DELETE FROM score_verifications WHERE round_id = $1::uuid", [
+                 Ecto.UUID.dump!(round_id)
+               ])
 
-    Repo.query!(
-      "ALTER TABLE public.score_revisions DISABLE TRIGGER score_revisions_immutable_rows"
-    )
+               Repo.query!(
+                 "ALTER TABLE public.score_revisions DISABLE TRIGGER score_revisions_immutable_rows"
+               )
 
-    try do
-      Repo.query!("DELETE FROM score_revisions WHERE round_id = $1::uuid", [
-        Ecto.UUID.dump!(round_id)
-      ])
-    after
-      Repo.query!(
-        "ALTER TABLE public.score_revisions ENABLE TRIGGER score_revisions_immutable_rows"
-      )
-    end
+               try do
+                 Repo.query!("DELETE FROM score_revisions WHERE round_id = $1::uuid", [
+                   Ecto.UUID.dump!(round_id)
+                 ])
+               after
+                 Repo.query!(
+                   "ALTER TABLE public.score_revisions ENABLE ALWAYS TRIGGER score_revisions_immutable_rows"
+                 )
 
-    Repo.query!("DELETE FROM hole_results WHERE round_id = $1::uuid", [
-      Ecto.UUID.dump!(round_id)
-    ])
+                 Repo.query!(
+                   "ALTER TABLE public.score_revisions ENABLE ALWAYS TRIGGER score_revisions_immutable_truncate"
+                 )
+               end
+
+               Repo.query!("DELETE FROM hole_results WHERE round_id = $1::uuid", [
+                 Ecto.UUID.dump!(round_id)
+               ])
+
+               assert [["A"], ["A"]] ==
+                        Repo.query!("""
+                        SELECT tgenabled::text
+                        FROM pg_trigger
+                        WHERE tgrelid = 'public.score_revisions'::regclass
+                          AND tgname IN (
+                            'score_revisions_immutable_rows',
+                            'score_revisions_immutable_truncate'
+                          )
+                        ORDER BY tgname
+                        """).rows
+
+               :deleted
+             end)
   end
 
   defp group_scoring_revision(group_id) do
@@ -985,6 +1220,49 @@ defmodule GolfScoring.Competition.Services.FillGroupRoleVacancyTest do
       ]).rows
 
     revision
+  end
+
+  defp hole_submission_count(round_id) do
+    [[count]] =
+      Repo.query!("SELECT count(*)::int FROM hole_submissions WHERE round_id = $1::uuid", [
+        Ecto.UUID.dump!(round_id)
+      ]).rows
+
+    count
+  end
+
+  defp submission_audit_count(round_id) do
+    [[count]] =
+      Repo.query!(
+        "SELECT count(*)::int FROM audit_events WHERE action = 'submit_group_hole' AND context->>'round_id' = $1",
+        [round_id]
+      ).rows
+
+    count
+  end
+
+  defp await_blocked_by!(waiting_pid, blocking_pid, deadline) do
+    [[blocked?]] =
+      Repo.query!(
+        "SELECT $1::integer = ANY(pg_blocking_pids($2::integer))",
+        [blocking_pid, waiting_pid]
+      ).rows
+
+    cond do
+      blocked? ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("expected PostgreSQL lock blocking between #{waiting_pid} and #{blocking_pid}")
+
+      true ->
+        Process.sleep(5)
+        await_blocked_by!(waiting_pid, blocking_pid, deadline)
+    end
+  end
+
+  defp pg_backend_pid! do
+    Repo.query!("SELECT pg_backend_pid()").rows |> hd() |> hd()
   end
 
   defp score_rows(group_id) do
@@ -1098,5 +1376,9 @@ defmodule GolfScoring.Competition.Services.FillGroupRoleVacancyTest do
       Repo.query!("DROP TRIGGER IF EXISTS #{trigger} ON #{table}")
       Repo.query!("DROP FUNCTION IF EXISTS #{function}()")
     end
+  end
+
+  def observe_query(_event, _measurements, metadata, owner) do
+    send(owner, {:fill_group_role_vacancy_query, metadata})
   end
 end

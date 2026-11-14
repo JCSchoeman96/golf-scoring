@@ -3,6 +3,7 @@ defmodule GolfScoring.Competition.Services.FillGroupRoleVacancy do
 
   alias Ash.Changeset
   alias GolfScoring.Accounts.EventAuthorityLock
+  alias GolfScoring.Accounts.StaffUser
   alias GolfScoring.Audit
   alias GolfScoring.Competition.GroupRoleAssignment
   alias GolfScoring.Competition.GroupRoleAssignmentGuard
@@ -27,19 +28,21 @@ defmodule GolfScoring.Competition.Services.FillGroupRoleVacancy do
           verification_mappings: [map()]
         }
 
-  @spec run(map(), Ecto.UUID.t(), Ecto.UUID.t(), Ecto.UUID.t(), Ecto.UUID.t(), atom()) ::
+  @spec run(StaffUser.t(), Ecto.UUID.t(), Ecto.UUID.t(), Ecto.UUID.t(), Ecto.UUID.t(), atom()) ::
           {:ok, filled()} | {:error, term()}
   def run(actor, event_id, round_id, playing_group_id, replacement_entry_id, role)
-      when is_map(actor) and role in @roles do
+      when role in @roles do
     if Repo.in_transaction?() do
       {:error, :transaction_already_open}
     else
-      with {:ok, actor_id} <- cast_uuid(Map.get(actor, :id)),
+      with %StaffUser{id: actor_id} <- actor,
+           {:ok, actor_id} <- Ecto.UUID.cast(actor_id),
            {:ok, input} <-
              normalize_input(event_id, round_id, playing_group_id, replacement_entry_id, role) do
         run_standalone(actor_id, input)
       else
-        _ -> {:error, :invalid_input}
+        {:error, _reason} = error -> error
+        _ -> {:error, :forbidden}
       end
     end
   end
